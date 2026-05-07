@@ -1,0 +1,42 @@
+{
+  "name": "@agora-build/stream-to-agora",
+  "version": "0.1.0",
+  "description": "Stream local files (and later https/rtmp/rtsp) to an Agora RTC channel.",
+  "bin": {
+    "stream-to-agora": "bin/stream-to-agora"
+  },
+  "scripts": {
+    "postinstall": "node install.js"
+  },
+  "files": [
+    "bin/",
+    "install.js",
+    "README.md"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Agora-Build/stream-to-agora.git"
+  },
+  "keywords": [
+    "agora",
+    "rtc",
+    "streaming",
+    "video",
+    "audio",
+    "ffmpeg"
+  ],
+  "author": "Agora Build <build@agora.io>",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/Agora-Build/stream-to-agora/issues"
+  },
+  "homepage": "https://github.com/Agora-Build/stream-to-agora#readme",
+  "os": [
+    "linux",
+    "darwin"
+  ],
+  "cpu": [
+    "x64",
+    "arm64"
+  ]
+}

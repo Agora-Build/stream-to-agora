@@ -20,12 +20,24 @@ Linux (x86_64, aarch64) and macOS (x86_64, aarch64). Windows is not on the roadm
 
 ## Install
 
-Until Phase 1 ships there's no useful binary. To build the scaffold from source:
+Once Phase 1 ships:
 
 ```bash
-git clone <this repo>
+# Quick install (works in regions where GitHub is slow)
+curl -fsSL https://dl.agora.build/stream-to-agora/install.sh | bash
+
+# Or via npm
+npm install -g @agora-build/stream-to-agora
+```
+
+Both paths drop the binary onto your `$PATH` and the Agora SDK shared libs in a sibling `lib/` so the binary's rpath finds them at runtime — no `LD_LIBRARY_PATH` needed.
+
+Build from source:
+
+```bash
+git clone https://github.com/Agora-Build/stream-to-agora
 cd stream-to-agora
-cargo build --release
+cargo build --release         # CMake downloads the Agora SDK on first build
 ./target/release/stream-to-agora --help
 ```
 
