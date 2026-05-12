@@ -1,6 +1,8 @@
 # @agora-build/stream-to-agora
 
-`stream-to-agora` — push local files (and later https/rtmp/rtsp) to an Agora RTC channel.
+Stream a local file (and later `https://` / `rtmp://` / `rtsp://`) to an [Agora](https://www.agora.io) RTC channel as a regular publisher. ffmpeg decodes the source; raw YUV (video) and PCM (audio) frames are pushed to Agora via the SDK's external-source APIs — useful for load testing, demos, simulated participants, and pumping pre-recorded media into a live channel.
+
+> **Status: pre-release.** v0.1 is a CLI scaffold; the SDK plumbing lands in the next milestones. The commands below are the intended surface — see the [project README](https://github.com/Agora-Build/stream-to-agora#readme) for the milestone tracker.
 
 ## Install
 
@@ -8,18 +10,99 @@
 npm install -g @agora-build/stream-to-agora
 ```
 
-The postinstall script downloads the right binary tarball for your platform from the GitHub release and unpacks the binary + the Agora SDK shared libraries it depends on into the package directory.
-
-Supported: `linux-x64`, `linux-arm64`, `darwin-x64`, `darwin-arm64`.
-
-## Alternative install (curl)
-
-If GitHub is slow in your region:
+Or via shell script:
 
 ```bash
 curl -fsSL https://dl.agora.build/stream-to-agora/install.sh | bash
 ```
 
+Both download a prebuilt bundle for your platform (linux-x64, linux-arm64, darwin-x64, darwin-arm64) — the binary plus the Agora SDK shared libraries it depends on. The binary's rpath finds the libs at runtime, so there's no `LD_LIBRARY_PATH` / `DYLD_LIBRARY_PATH` setup.
+
 ## Usage
 
-See the [project README](https://github.com/Agora-Build/stream-to-agora#readme).
+```bash
+stream-to-agora <INPUT> --app-id <ID> --channel <NAME> --rtc-user-id <UID> --token <TOKEN> [OPTIONS]
+```
+
+```bash
+# Local file
+stream-to-agora ./demo.mp4 \
+  --app-id      $AGORA_APP_ID \
+  --channel     demo \
+  --rtc-user-id 42 \
+  --token       "$RTC_TOKEN"
+
+# String account (same "s/" convention as `atem serv rtc`)
+stream-to-agora ./demo.mp4 --app-id ... --channel demo --rtc-user-id s/alice --token "$RTC_TOKEN"
+
+# Loop forever — steady-state load testing
+stream-to-agora ./loop.mp4 --app-id ... --channel demo --rtc-user-id 42 --token "$RTC_TOKEN" --loop
+
+# Audio only / video only
+stream-to-agora ./demo.mp4 --app-id ... --channel demo --rtc-user-id 42 --token "$RTC_TOKEN" --audio-only
+
+# Remote source (later release — ffmpeg already handles these, so the arg shape is unchanged)
+stream-to-agora rtmp://live.example.com/app/key --app-id ... --channel demo --rtc-user-id 42 --token "$RTC_TOKEN"
+```
+
+### Options
+
+| Flag | Description |
+|---|---|
+| `--app-id <ID>` | Agora App ID. Falls back to `AGORA_APP_ID` env var. |
+| `--channel <NAME>` | RTC channel to join. |
+| `--rtc-user-id <UID>` | RTC user. All-digit → int uid; non-digit → string account; `s/` prefix forces string mode. |
+| `--token <TOKEN>` | Pre-minted RTC token (required). |
+| `--loop` | Restart the input on EOF. |
+| `--audio-only` / `--video-only` | Push just one track. |
+| `--ffmpeg-path <PATH>` | ffmpeg binary (default: `ffmpeg` on `PATH`). |
+
+### Tokens
+
+stream-to-agora **does not mint tokens** — token minting is a security-sensitive concern that belongs in your token service or [atem](https://github.com/Agora-Build/Atem). Supply a pre-minted token:
+
+```bash
+TOKEN=$(atem token rtc create --channel demo --rtc-user-id 42)
+stream-to-agora ./demo.mp4 --app-id $AGORA_APP_ID --channel demo --rtc-user-id 42 --token "$TOKEN"
+```
+
+Two publishers on the same channel must use different uids (Agora kicks a duplicate uid). Same channel + different uids = fine.
+
+## Requirements
+
+- **ffmpeg** on `PATH` (or pass `--ffmpeg-path`). Used to decode the input into raw frames.
+- The project must have an App Certificate and the token must be valid for the channel + uid + publisher role.
+
+## Supported Platforms
+
+| Platform | Architecture |
+|---|---|
+| Linux | x64, arm64 |
+| macOS | x64, arm64 |
+
+Windows is not on the roadmap.
+
+## Build from Source
+
+```bash
+git clone https://github.com/Agora-Build/stream-to-agora.git
+cd stream-to-agora
+cargo build --release         # CMake fetches the Agora SDK on first build
+# Binary at target/release/stream-to-agora
+```
+
+To skip the SDK auto-download and point at a pre-staged SDK:
+
+```bash
+AGORA_RTC_SDK_PATH=/path/to/agora_rtc_sdk cargo build --release
+```
+
+## Related Projects
+
+- [atem](https://github.com/Agora-Build/Atem) — Agora platform terminal: projects, tokens, ConvoAI test pages, webhook receiver, AI agent integration
+- [Astation](https://github.com/Agora-Build/Astation) — macOS menubar hub coordinating Chisel, atem, and AI agents
+- [Vox](https://github.com/Agora-Build/Vox) — AI latency evaluation platform
+
+## License
+
+MIT
