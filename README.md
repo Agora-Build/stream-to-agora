@@ -4,12 +4,12 @@ Stream a local file (and later https/rtmp/rtsp) to an Agora RTC channel as a reg
 
 ## Status
 
-**v0.1 — Phase 0: scaffold only.** The CLI parses, validates args, mints an RTC token, and prints what it would do. No SDK calls yet. The next milestones add the real plumbing.
+**v0.1 — Phase 0: scaffold only.** The CLI parses, validates args, and prints what it would do. No SDK calls yet. The next milestones add the real plumbing.
 
 | Phase | Milestone | Status |
 |---|---|---|
-| 0 | CLI surface, token mint, arg validation | ✅ this commit |
-| 1 | Agora RTC SDK loads, joins channel, logs "ready", idles | ⏳ next |
+| 0 | CLI surface, arg validation | ✅ |
+| 1 | Agora SDK loads, joins channel, logs "ready", idles | ⏳ next |
 | 2 | Stream a static H.264 + AAC file end-to-end | ⏳ |
 | 3 | Arbitrary file via ffmpeg pipeline (any codec ffmpeg decodes) | ⏳ |
 | 4 | Remote sources: `https://`, `rtmp://`, `rtsp://` | ⏳ |
@@ -20,25 +20,27 @@ Linux (x86_64, aarch64) and macOS (x86_64, aarch64). Windows is not on the roadm
 
 ## Install
 
-Once Phase 1 ships:
-
 ```bash
-# Quick install (works in regions where GitHub is slow)
-curl -fsSL https://dl.agora.build/stream-to-agora/install.sh | bash
-
-# Or via npm
 npm install -g @agora-build/stream-to-agora
 ```
 
-Both paths drop the binary onto your `$PATH` and the Agora SDK shared libs in a sibling `lib/` so the binary's rpath finds them at runtime — no `LD_LIBRARY_PATH` needed.
-
-Build from source:
+Or via shell script:
 
 ```bash
-git clone https://github.com/Agora-Build/stream-to-agora
+curl -fsSL https://dl.agora.build/stream-to-agora/install.sh | bash
+```
+
+Or download a binary from [Releases](https://github.com/Agora-Build/stream-to-agora/releases).
+
+(Both packaged installs drop the binary on your `$PATH` and the Agora SDK shared libs in a sibling `lib/` — the binary's rpath finds them at runtime, no `LD_LIBRARY_PATH` needed.)
+
+## Build from source
+
+```bash
+git clone git@github.com:Agora-Build/stream-to-agora.git
 cd stream-to-agora
-cargo build --release         # CMake downloads the Agora SDK on first build
-./target/release/stream-to-agora --help
+cargo build --release         # CMake fetches the Agora SDK on first build
+# Binary at target/release/stream-to-agora
 ```
 
 ## Tokens
@@ -85,31 +87,37 @@ stream-to-agora does NOT read atem's encrypted credentials store or active proje
 ## Architecture
 
 ```
-┌─────────────┐    raw YUV     ┌─────────────┐    join+pushVideo    ┌────────┐
-│   ffmpeg    │ ─────────────→ │  stream-to- │ ──────────────────→ │ Agora  │
-│  (decoder)  │    raw PCM     │   agora     │    join+pushAudio   │  RTC   │
-└─────────────┘ ─────────────→ │  (Rust+FFI) │ ──────────────────→ └────────┘
-                                └──────┬──────┘
-                                       │ FFI (C ABI)
-                                       ▼
-                                ┌─────────────┐
-                                │ agora_shim  │  C++ wrapper around
-                                │   (C++)     │  the Agora RTC SDK
-                                └─────────────┘
+┌─────────────┐   raw YUV    ┌──────────────┐   conn_connect / send_video   ┌────────┐
+│   ffmpeg    │ ───────────→ │ stream-to-   │ ───────────────────────────→ │ Agora  │
+│  (decoder)  │   raw PCM    │ agora (Rust) │   send_audio_pcm              │  RTC   │
+└─────────────┘ ───────────→ │              │ ───────────────────────────→ └────────┘
+                              └──────┬───────┘
+                                     │ FFI (extern "C")
+                                     ▼
+                            libagora_rtc_sdk.so   ← Agora NG SDK's flat C API
+                                                    (include/c/api2/…)
 ```
 
-- `src/main.rs` — Rust CLI, ffmpeg subprocess management, frame pacing
-- `native/src/agora_shim.cpp` — thin C++ wrapper over Agora's C++ SDK
-- `native/include/agora_shim.h` — C ABI exported to Rust
-- `build.rs` — locates/downloads the SDK at build time, compiles the shim
+The Agora NG SDK ships a flat C API (`agora_service_create`, `agora_rtc_conn_connect`, `agora_video_frame_sender_send`, …), so Rust links it directly via `extern "C"` — no C++ shim.
+
+- `src/main.rs` — CLI, ffmpeg subprocess management, frame pacing
+- `src/agora.rs` — safe Rust wrappers over the SDK's C API *(Phase 1)*
+- `CMakeLists.txt` — downloads + stages the Agora SDK at build time, emits include/lib paths
+- `build.rs` — runs CMake, links `libagora_rtc_sdk`, sets rpath
 
 ## Development
 
 ```bash
-cargo build              # debug
+cargo build              # debug — CMake fetches the SDK on first build
 cargo test               # unit tests (CLI parsing, input classification)
 cargo clippy             # lint
-cargo run -- ./demo.mp4 --app-id $APP --app-certificate $CERT --channel test --rtc-user-id 42
+cargo run -- ./demo.mp4 --app-id $AGORA_APP_ID --channel test --rtc-user-id 42 --token "$TOKEN"
+```
+
+Use a pre-staged SDK instead of the auto-download:
+
+```bash
+AGORA_RTC_SDK_PATH=/path/to/agora_rtc_sdk cargo build
 ```
 
 ## License
