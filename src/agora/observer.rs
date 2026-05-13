@@ -16,6 +16,11 @@ pub enum ConnEvent {
     Failed { code: i32, msg: String },
     /// SIGINT received or `--duration` elapsed — caller asked us to stop.
     Shutdown,
+    /// `on_token_privilege_will_expire` fired — the SDK is ~30 s away
+    /// from rejecting the current token. The renew task uses this to
+    /// run `--token-renew-cmd`. Emitted ONLY to the optional renew
+    /// sender (see `set_renew_sender`), never to the main `EVENT_TX`.
+    TokenWillExpire { current: String },
 }
 
 /// What the main thread should do given a received `ConnEvent`.
@@ -27,6 +32,8 @@ pub enum Outcome {
     Stop,
     /// Abort with a non-zero exit and this message.
     Fatal { message: String },
+    /// The event is benign noise; the main loop should keep waiting.
+    Continue,
 }
 
 /// Pure decision: given an event we just received, what happens next?
@@ -47,6 +54,9 @@ pub fn outcome_for(event: &ConnEvent) -> Outcome {
             };
             Outcome::Fatal { message }
         }
+        // TokenWillExpire never reaches outcome_for in practice (the trampoline
+        // emits only to RENEW_TX, not EVENT_TX). This arm is defense-in-depth.
+        ConnEvent::TokenWillExpire { .. } => Outcome::Continue,
     }
 }
 
@@ -93,15 +103,29 @@ use super::sys;
 /// this global with a connection-keyed map (e.g. `DashMap<conn_id, Sender>`).
 static EVENT_TX: Mutex<Option<Sender<ConnEvent>>> = Mutex::new(None);
 
+/// Second sender for the renew task. Only fed by the
+/// `on_token_privilege_will_expire` trampoline; not used by any other
+/// callback. None when `--token-renew-cmd` is not set.
+static RENEW_TX: Mutex<Option<Sender<ConnEvent>>> = Mutex::new(None);
+
 /// Install the channel sender the trampolines will push events into.
 /// Must be called before the observer is registered with the SDK.
 pub(super) fn set_event_sender(tx: Sender<ConnEvent>) {
     *EVENT_TX.lock().unwrap() = Some(tx);
 }
-/// Remove the event sender; subsequent trampoline callbacks become no-ops.
+
+/// Optional second sender for the renew task. The
+/// `on_token_privilege_will_expire` callback emits only to this
+/// sender, so `Session::run` never sees `TokenWillExpire`.
+pub(super) fn set_renew_sender(tx: Sender<ConnEvent>) {
+    *RENEW_TX.lock().unwrap() = Some(tx);
+}
+
+/// Remove both event senders; subsequent trampoline callbacks become no-ops.
 /// Called from `Session::Drop`.
 pub(super) fn clear_event_sender() {
     *EVENT_TX.lock().unwrap() = None;
+    *RENEW_TX.lock().unwrap() = None;
 }
 
 /// Send an event from a callback thread. Never panics, never unwinds.
@@ -180,6 +204,34 @@ unsafe extern "C" fn on_error(
     });
 }
 
+unsafe extern "C" fn on_token_privilege_will_expire(
+    _conn: *mut c_void,
+    token: *const c_char,
+) {
+    guard(|| {
+        let current = unsafe { cstr(token) };
+        // Emit ONLY to the renew sender. The main event channel doesn't
+        // care about this event. If no renew task is registered, the
+        // event is dropped.
+        if let Ok(guard) = RENEW_TX.lock() {
+            if let Some(tx) = guard.as_ref() {
+                let _ = tx.send(ConnEvent::TokenWillExpire { current });
+            }
+        }
+    });
+}
+
+unsafe extern "C" fn on_token_privilege_did_expire(_conn: *mut c_void) {
+    guard(|| {
+        // Hard failure: SDK will start rejecting frames imminently.
+        // Emit via the main channel so Session::run sees Failed.
+        emit(ConnEvent::Failed {
+            code: 109, // ERR_TOKEN_EXPIRED
+            msg: "token expired without renewal".into(),
+        });
+    });
+}
+
 /// Build the observer struct: all fields zeroed (= no callback) except the
 /// few Phase 1 cares about. `sys::rtc_conn_observer` derives `Default` via
 /// bindgen (`derive_default(true)`); a zeroed struct of fn pointers means
@@ -191,5 +243,7 @@ pub(super) fn build_observer() -> sys::rtc_conn_observer {
     o.on_connection_lost = Some(on_connection_lost);
     o.on_connection_failure = Some(on_connection_failure);
     o.on_error = Some(on_error);
+    o.on_token_privilege_will_expire = Some(on_token_privilege_will_expire);
+    o.on_token_privilege_did_expire = Some(on_token_privilege_did_expire);
     o
 }

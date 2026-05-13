@@ -277,6 +277,7 @@ impl Session {
                         return Err(AgoraError::msg("connection", message))
                     }
                     Outcome::Ready { .. } => continue, // shouldn't recur; ignore
+                    Outcome::Continue => continue,
                 },
                 Err(_) => return Ok(()), // all senders dropped — treat as shutdown
             }
