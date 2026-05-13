@@ -154,7 +154,25 @@ async fn main() -> Result<()> {
         token: cli.token.clone(),
         connect_timeout: std::time::Duration::from_secs(cli.connect_timeout),
     };
+
+    // If --token-renew-cmd is set, allocate a tokio mpsc channel that the
+    // observer's on_token_privilege_will_expire trampoline will emit to.
+    // The renew task consumes the receive end.
+    let (renew_tx, renew_rx) = if cli.token_renew_cmd.is_some() {
+        let (t, r) = tokio::sync::mpsc::unbounded_channel::<agora::ConnEvent>();
+        (Some(t), Some(r))
+    } else {
+        (None, None)
+    };
+
     let mut session = agora::Session::connect(&cfg).await?;
+
+    // Wire the renew task's sender into the observer (P3-T4's RENEW_TX).
+    // Must happen AFTER Session::connect because connect calls
+    // observer::set_event_sender; we add ours on top.
+    if let Some(rtx) = renew_tx {
+        session.set_renew_sender(rtx);
+    }
 
     println!("ready");
     eprintln!("  channel:   {}", cli.channel);
@@ -272,6 +290,57 @@ async fn main() -> Result<()> {
                 }
             }
         }
+    }
+
+    // Token-renew task: subscribe to TokenWillExpire on the renew channel,
+    // run the shell command, take the entire trimmed stdout as the new
+    // token, call RenewHandle::renew(). Registered with the Session so
+    // Session::run's cancel+join handles its shutdown.
+    if let (Some(cmd), Some(mut renew_rx)) = (cli.token_renew_cmd.clone(), renew_rx) {
+        let renew_handle = session.renew_handle();
+        let cancel_clone = session.cancel_signal();
+        let chan = cli.channel.clone();
+        let uid = cli.rtc_user_id.clone();
+        let jh = tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = cancel_clone.notified() => return,
+                    ev = renew_rx.recv() => match ev {
+                        Some(agora::ConnEvent::TokenWillExpire { current: _ }) => {
+                            let sub = substitute_token_cmd(&cmd, &chan, &uid);
+                            match tokio::process::Command::new("sh")
+                                .args(["-c", &sub])
+                                .output()
+                                .await
+                            {
+                                Ok(o) if o.status.success() => {
+                                    let new_token = String::from_utf8_lossy(&o.stdout)
+                                        .trim()
+                                        .to_string();
+                                    if new_token.is_empty() {
+                                        eprintln!("warning: token-renew-cmd produced empty stdout");
+                                    } else if let Err(e) = renew_handle.renew(&new_token) {
+                                        eprintln!("warning: agora_rtc_conn_renew_token failed: {e}");
+                                    } else {
+                                        eprintln!("token renewed");
+                                    }
+                                }
+                                Ok(o) => eprintln!(
+                                    "warning: token-renew-cmd exit {}: {}",
+                                    o.status,
+                                    String::from_utf8_lossy(&o.stderr).trim()
+                                ),
+                                Err(e) => eprintln!("warning: token-renew-cmd spawn failed: {e}"),
+                            }
+                        }
+                        Some(_) => continue, // other events not for us
+                        None => return,      // sender dropped — exit
+                    }
+                }
+            }
+        });
+        session.register_pump(jh).await;
     }
 
     // Feed Shutdown into the session's channel on SIGINT or after --duration.
