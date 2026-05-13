@@ -5,4 +5,5 @@ mod observer;
 mod session;
 
 pub use error::AgoraError;
+pub use observer::ConnEvent;
 pub use session::{Session, SessionConfig};

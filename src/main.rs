@@ -63,6 +63,15 @@ struct Cli {
     /// Path to the ffmpeg binary. Defaults to "ffmpeg" on PATH.
     #[arg(long, default_value = "ffmpeg")]
     ffmpeg_path: String,
+
+    /// Seconds to wait for the channel connection before giving up.
+    #[arg(long, default_value_t = 10)]
+    connect_timeout: u64,
+
+    /// If set, hold the connection for this many seconds after `ready`,
+    /// then disconnect and exit. Omit to idle until Ctrl-C.
+    #[arg(long)]
+    duration: Option<u64>,
 }
 
 fn main() -> Result<()> {
@@ -85,28 +94,45 @@ fn main() -> Result<()> {
         );
     }
 
-    println!("stream-to-agora (v0.1 — Phase 0 scaffold, no SDK yet)");
-    println!("  app id:       {}", redact_tail(&cli.app_id));
-    println!("  channel:      {}", cli.channel);
-    println!("  rtc user:     {}", cli.rtc_user_id);
-    println!("  input:        {}  ({:?})", cli.input, input_kind);
-    println!("  ffmpeg path:  {}", cli.ffmpeg_path);
-    println!("  loop:         {}", cli.r#loop);
-    println!(
-        "  tracks:       {}",
-        match (cli.audio_only, cli.video_only) {
-            (true, false)  => "audio only",
-            (false, true)  => "video only",
-            _              => "audio + video",
-        }
-    );
-    println!();
-    println!("Phase 1 will:");
-    println!("  • Load the Agora RTC SDK (flat C API) via extern \"C\" FFI");
-    println!("  • Join `{}` as `{}`", cli.channel, cli.rtc_user_id);
-    println!("  • Log \"ready\" then idle until SIGINT");
-    println!();
-    println!("Not implemented yet — this is the v0.1 scaffold.");
+    let uid = parse_rtc_user_id(&cli.rtc_user_id);
+
+    eprintln!("stream-to-agora: connecting to channel `{}` as `{}`…", cli.channel, cli.rtc_user_id);
+    let cfg = agora::SessionConfig {
+        app_id: cli.app_id.clone(),
+        channel: cli.channel.clone(),
+        user_id: uid.value,
+        use_string_uid: uid.string_mode,
+        token: cli.token.clone(),
+        connect_timeout: std::time::Duration::from_secs(cli.connect_timeout),
+    };
+    let session = agora::Session::connect(&cfg)?;
+
+    println!("ready");
+    eprintln!("  channel:   {}", cli.channel);
+    eprintln!("  rtc user:  {}", cli.rtc_user_id);
+    eprintln!("  conn id:   {}", session.conn_id);
+
+    // Feed Shutdown into the session's channel on SIGINT or after --duration.
+    let shutdown_tx = session.sender();
+    {
+        let tx = shutdown_tx.clone();
+        ctrlc::set_handler(move || { let _ = tx.send(agora::ConnEvent::Shutdown); })
+            .map_err(|e| anyhow::anyhow!("failed to install SIGINT handler: {e}"))?;
+    }
+    if let Some(secs) = cli.duration {
+        let tx = shutdown_tx.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_secs(secs));
+            let _ = tx.send(agora::ConnEvent::Shutdown);
+        });
+        eprintln!("  holding for {secs}s, then disconnecting…");
+    } else {
+        eprintln!("  idling — press Ctrl-C to disconnect.");
+    }
+
+    session.run()?;            // returns Ok on Shutdown, Err on a fatal conn event
+    eprintln!("disconnected.");
+    drop(session);             // explicit: triggers clean SDK teardown
     Ok(())
 }
 
@@ -126,6 +152,22 @@ fn classify_input(s: &str) -> InputKind {
     else if lower.starts_with("rtsp://")  { InputKind::Rtsp }
     else if lower.contains("://")         { InputKind::Unknown }
     else                                   { InputKind::LocalFile }
+}
+
+/// Parsed `--rtc-user-id`. `value` is what we pass to the SDK (always a
+/// string — `user_id_t` is `const char*`); `string_mode` says whether the
+/// SDK should treat the connection as a string-account connection.
+/// Convention (matches `atem serv rtc`): all-digit → numeric; leading `s/`
+/// or any non-digit → string account (with `s/` stripped if present).
+#[derive(Debug)]
+struct ParsedUid { value: String, string_mode: bool }
+
+fn parse_rtc_user_id(raw: &str) -> ParsedUid {
+    if let Some(rest) = raw.strip_prefix("s/") {
+        return ParsedUid { value: rest.to_string(), string_mode: true };
+    }
+    let all_digits = !raw.is_empty() && raw.bytes().all(|b| b.is_ascii_digit());
+    ParsedUid { value: raw.to_string(), string_mode: !all_digits }
 }
 
 /// Show the first 8 chars of an app id followed by ellipsis. Logs go
@@ -155,5 +197,25 @@ mod tests {
         assert_eq!(redact_tail("short"), "short");
         assert_eq!(redact_tail("aaaaaaaaaaaa"), "aaaaaaaaaaaa"); // exactly 12
         assert_eq!(redact_tail("0123456789abcdef"), "0123456789ab…");
+    }
+
+    #[test]
+    fn parse_rtc_user_id_modes() {
+        // all digits -> numeric mode, passed through as the digit string
+        let p = parse_rtc_user_id("42");
+        assert_eq!(p.value, "42");
+        assert!(!p.string_mode);
+        // leading "s/" forces string mode, prefix stripped
+        let p = parse_rtc_user_id("s/1232");
+        assert_eq!(p.value, "1232");
+        assert!(p.string_mode);
+        // non-digit -> string mode, used verbatim
+        let p = parse_rtc_user_id("alice");
+        assert_eq!(p.value, "alice");
+        assert!(p.string_mode);
+        // "s/" with a non-digit body
+        let p = parse_rtc_user_id("s/alice");
+        assert_eq!(p.value, "alice");
+        assert!(p.string_mode);
     }
 }
