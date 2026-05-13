@@ -5,4 +5,5 @@
 //!   - pcm:  interleaved s16le (from `ffmpeg -f s16le`)  [P2-T6]
 
 pub mod aac;
-// h264 / yuv / pcm modules added in P2-T5 / P2-T6.
+pub mod h264;
+// yuv / pcm modules added in P2-T6.
