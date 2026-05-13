@@ -41,12 +41,26 @@ fn main() {
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     match target_os.as_str() {
         "linux" => {
+            // Use DT_RPATH (not DT_RUNPATH): libagora_rtc_sdk.so has its own
+            // DT_NEEDED siblings (libagora-fdkaac.so, libaosl.so) but no rpath
+            // of its own. The loader searches the executable's DT_RPATH for
+            // those transitive deps, but NOT DT_RUNPATH. --disable-new-dtags
+            // flips the default back to DT_RPATH so sibling SDK libs resolve.
+            println!("cargo:rustc-link-arg=-Wl,--disable-new-dtags");
+            // Order matters: $ORIGIN-relative paths first (deployed layouts),
+            // then the absolute build-tree path as a fallback for `cargo run`
+            // straight from target/.
+            println!("cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN");                       // co-located (curl-install tarball, dev runs from target/release)
+            println!("cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN/../lib");                // npm package layout (bin/ + lib/ siblings)
+            println!("cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN/../lib/stream-to-agora"); // install.sh layout (/usr/local/bin + /usr/local/lib/stream-to-agora)
             println!("cargo:rustc-link-arg=-Wl,-rpath,{}", sdk_lib_dir);
-            println!("cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN");
         }
         "macos" => {
-            println!("cargo:rustc-link-arg=-Wl,-rpath,{}", sdk_lib_dir);
+            // macOS uses DT_RPATH semantics by default; no --disable-new-dtags needed.
             println!("cargo:rustc-link-arg=-Wl,-rpath,@loader_path");
+            println!("cargo:rustc-link-arg=-Wl,-rpath,@loader_path/../lib");
+            println!("cargo:rustc-link-arg=-Wl,-rpath,@loader_path/../lib/stream-to-agora");
+            println!("cargo:rustc-link-arg=-Wl,-rpath,{}", sdk_lib_dir);
         }
         _ => {}
     }
