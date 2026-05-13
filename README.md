@@ -4,21 +4,20 @@ Stream a local file (and later https/rtmp/rtsp) to an Agora RTC channel as a reg
 
 ## Status
 
-**Phase 2: publishes.** The CLI runs ffmpeg against any input file it can
-read, then publishes one audio + one video track to the RTC channel.
-If the input is H.264 video + AAC audio, the encoded frames pass through
-unchanged (`-c copy`, zero-CPU). Any other codec ffmpeg can decode
-(H.265 / VP8 / VP9 / AV1 / Opus / MP3 / Vorbis / PCM / …) is decoded to
-raw YUV+PCM and pushed via Agora's raw-frame senders; Agora's edge
-re-encodes downstream. `--loop` for steady-state publish; `--duration`
-for bounded soak runs.
+**Phase 3: publishes from remote sources.** The CLI accepts `http://`,
+`https://`, `rtmp://`, and `rtsp://` URLs in addition to local files,
+with hybrid reconnect (ffmpeg `-reconnect` flags for HTTP; respawn for
+RTMP/RTSP, bounded by `--reconnect-attempts`). Selective publish
+(`--audio-only` / `--video-only`), token renewal (`--token-renew-cmd`),
+and ffmpeg input flags (`--http-header`, `--user-agent`,
+`--rtsp-transport`) are wired.
 
 | Phase | Milestone | Status |
 |---|---|---|
 | 0 | CLI surface, arg validation | ✅ |
 | 1 | Agora SDK loads, joins channel, logs "ready", idles | ✅ |
 | 2 | Publish a local file via ffmpeg (any codec ffmpeg reads) | ✅ |
-| 3 | Remote sources: `https://`, `rtmp://`, `rtsp://` | ⏳ next |
+| 3 | Remote sources (`https://`, `rtmp://`, `rtsp://`); selective publish; token renewal; ffmpeg input flags | ✅ |
 
 ## Platforms
 
@@ -83,6 +82,34 @@ stream-to-agora ./loop.mp4 --app-id ... --channel demo --rtc-user-id 42 --token 
 
 # Remote source (Phase 3)
 stream-to-agora rtmp://live.example.com/app/key --app-id ... --channel demo --rtc-user-id 42 --token "$TOKEN"
+
+# Remote HTTPS source
+stream-to-agora https://example.com/stream.mp4 \
+  --app-id $AGORA_APP_ID --channel demo --rtc-user-id 42 --token "$TOKEN"
+
+# RTMP ingest with reconnect (default --reconnect-attempts 5)
+stream-to-agora rtmp://origin.example.com/live/demo \
+  --app-id ... --channel demo --rtc-user-id 42 --token "$TOKEN"
+
+# RTSP camera through a UDP-blocking NAT
+stream-to-agora rtsp://camera.local/stream1 --rtsp-transport tcp \
+  --app-id ... --channel demo --rtc-user-id 42 --token "$TOKEN"
+
+# Audio-only publish from a video file
+stream-to-agora ./talk.mp4 --audio-only \
+  --app-id ... --channel demo --rtc-user-id 42 --token "$TOKEN"
+
+# Auth'd HLS source with a Bearer token and custom UA
+stream-to-agora https://secured.example/master.m3u8 \
+  --http-header 'Authorization: Bearer abc123' \
+  --user-agent 'stream-to-agora/0.3' \
+  --app-id ... --channel demo --rtc-user-id 42 --token "$TOKEN"
+
+# Long stream with auto-renew (90s tokens for fast iteration during dev)
+TOKEN=$(atem token rtc create --channel demo --rtc-user-id 42 --expire 90 | awk '/^RTC Token/{getline; print; exit}')
+stream-to-agora ./show.mp4 --loop --duration 600 \
+  --token-renew-cmd 'atem token rtc create --channel {channel} --rtc-user-id {rtc_user_id} --expire 90 | awk "/^RTC Token created/{getline; print; exit}"' \
+  --app-id ... --channel demo --rtc-user-id 42 --token "$TOKEN"
 ```
 
 ## Configuration consistency with atem
@@ -96,6 +123,23 @@ Same env-var name and flag conventions so a shell that has atem set up also has 
 | RTC user | `--rtc-user-id` (with `s/` prefix to force string account) | atem, stream-to-agora |
 
 stream-to-agora does NOT read atem's encrypted credentials store or active project — it's intentionally standalone so it can be dropped on a fresh machine without atem installed.
+
+### Token renewal
+
+`--token-renew-cmd <shell command>` runs the given command via `sh -c …`
+whenever the SDK signals that the active token is ~30 s from expiry.
+The entire trimmed stdout of the command becomes the new token; the
+command's stderr is logged on failure.
+
+Placeholders supported inside the command string:
+- `{channel}` — the channel name passed via `--channel`
+- `{rtc_user_id}` — the user id passed via `--rtc-user-id`
+
+The command should print exactly one token to stdout. For `atem`:
+
+```bash
+--token-renew-cmd 'atem token rtc create --channel {channel} --rtc-user-id {rtc_user_id} | awk "/^RTC Token created/{getline; print; exit}"'
+```
 
 ## Architecture
 

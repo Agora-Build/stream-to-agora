@@ -3,9 +3,10 @@
 //!
 //! Phase 0: CLI surface + arg validation.
 //! Phase 1: create the SDK service, open an RTC connection, log "ready", idle.
-//! Phase 2 (current): publish one audio + one video track from any file
-//!         ffmpeg can read; --loop for steady-state, --duration for bounded.
-//! Phase 3: remote sources (https / rtmp / rtsp inputs).
+//! Phase 2: publish one audio + one video track from any file ffmpeg can read.
+//! Phase 3 (current): remote sources (https/rtmp/rtsp); --audio-only/--video-only;
+//!         --token-renew-cmd; ffmpeg input flags (--http-header, --user-agent,
+//!         --rtsp-transport).
 
 mod agora;
 mod ffmpeg;
