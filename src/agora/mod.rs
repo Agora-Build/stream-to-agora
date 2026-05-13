@@ -3,6 +3,7 @@ mod sys;
 mod error;
 mod observer;
 mod session;
+mod publisher;
 
 // AgoraError is the error type returned by Session::connect and Session::run.
 // It's re-exported for callers that want to match on it directly; the binary
@@ -11,4 +12,5 @@ mod session;
 #[allow(unused_imports)]
 pub use error::AgoraError;
 pub use observer::ConnEvent;
+pub use publisher::CodecMode;
 pub use session::{Session, SessionConfig};
