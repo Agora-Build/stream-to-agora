@@ -9,6 +9,7 @@
 //! Phase 4: https / rtmp / rtsp inputs.
 
 mod agora;
+mod ffmpeg;
 
 use anyhow::{Result, bail};
 use clap::Parser;
