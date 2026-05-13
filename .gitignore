@@ -6,3 +6,9 @@ target/
 .vscode/
 # Agora SDK staging dir (downloaded by build.rs in Phase 1)
 agora-sdk/
+
+# Agora SDK runtime artifacts (written to CWD when the binary runs)
+agora_cache.db
+agoradns.dat
+agorareport.dat
+common_resource/
