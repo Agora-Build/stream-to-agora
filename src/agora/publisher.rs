@@ -42,10 +42,73 @@ pub fn decide(info: &MediaInfo) -> CodecMode {
     if video_ok && audio_ok { CodecMode::Encoded } else { CodecMode::Raw }
 }
 
-/// Placeholder — replaced wholesale in Task 11 with `Encoded(EncodedAudioPublisher) / Raw(RawAudioPublisher)`.
-pub enum AudioPublisher { Placeholder }
-/// Placeholder — replaced wholesale in Task 11.
-pub enum VideoPublisher { Placeholder }
+use std::os::raw::c_void;
+
+use super::audio::{create_encoded as create_audio_encoded, create_raw as create_audio_raw,
+                   EncodedAudioPublisher, RawAudioPublisher};
+use super::error::AgoraError;
+use super::video::{create_encoded as create_video_encoded, create_raw as create_video_raw,
+                   EncodedVideoPublisher, RawVideoPublisher};
+
+pub enum AudioPublisher {
+    Encoded(EncodedAudioPublisher),
+    Raw(RawAudioPublisher),
+}
+
+pub enum VideoPublisher {
+    Encoded(EncodedVideoPublisher),
+    Raw(RawVideoPublisher),
+}
+
+impl AudioPublisher {
+    pub fn publish(&self) -> Result<(), AgoraError> {
+        match self {
+            AudioPublisher::Encoded(p) => p.publish(),
+            AudioPublisher::Raw(p) => p.publish(),
+        }
+    }
+    pub fn unpublish(&self) -> Result<(), AgoraError> {
+        match self {
+            AudioPublisher::Encoded(p) => p.unpublish(),
+            AudioPublisher::Raw(p) => p.unpublish(),
+        }
+    }
+}
+
+impl VideoPublisher {
+    pub fn publish(&self) -> Result<(), AgoraError> {
+        match self {
+            VideoPublisher::Encoded(p) => p.publish(),
+            VideoPublisher::Raw(p) => p.publish(),
+        }
+    }
+    pub fn unpublish(&self) -> Result<(), AgoraError> {
+        match self {
+            VideoPublisher::Encoded(p) => p.unpublish(),
+            VideoPublisher::Raw(p) => p.unpublish(),
+        }
+    }
+}
+
+/// Dispatch helper invoked from `Session::create_audio_publisher`.
+pub(super) fn create_audio(svc: *mut c_void, conn: *mut c_void, factory: *mut c_void, mode: CodecMode)
+    -> Result<AudioPublisher, AgoraError>
+{
+    match mode {
+        CodecMode::Encoded => create_audio_encoded(svc, conn, factory).map(AudioPublisher::Encoded),
+        CodecMode::Raw     => create_audio_raw(svc, conn, factory).map(AudioPublisher::Raw),
+    }
+}
+
+/// Dispatch helper invoked from `Session::create_video_publisher`.
+pub(super) fn create_video(svc: *mut c_void, conn: *mut c_void, factory: *mut c_void, mode: CodecMode)
+    -> Result<VideoPublisher, AgoraError>
+{
+    match mode {
+        CodecMode::Encoded => create_video_encoded(svc, conn, factory).map(VideoPublisher::Encoded),
+        CodecMode::Raw     => create_video_raw(svc, conn, factory).map(VideoPublisher::Raw),
+    }
+}
 
 #[cfg(test)]
 mod tests {
