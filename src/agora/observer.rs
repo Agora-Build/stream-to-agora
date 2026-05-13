@@ -88,11 +88,18 @@ use super::sys;
 /// `rtc_conn_observer` struct has no user-data slot, so the trampolines
 /// reach the event channel through this process-global. `Session::connect`
 /// installs the sender before registering the observer and clears it on Drop.
+///
+/// TODO(phase2): when a second simultaneous connection is needed, replace
+/// this global with a connection-keyed map (e.g. `DashMap<conn_id, Sender>`).
 static EVENT_TX: Mutex<Option<Sender<ConnEvent>>> = Mutex::new(None);
 
+/// Install the channel sender the trampolines will push events into.
+/// Must be called before the observer is registered with the SDK.
 pub(super) fn set_event_sender(tx: Sender<ConnEvent>) {
     *EVENT_TX.lock().unwrap() = Some(tx);
 }
+/// Remove the event sender; subsequent trampoline callbacks become no-ops.
+/// Called from `Session::Drop`.
 pub(super) fn clear_event_sender() {
     *EVENT_TX.lock().unwrap() = None;
 }
@@ -111,6 +118,12 @@ fn guard<F: FnOnce() + std::panic::UnwindSafe>(f: F) {
     let _ = catch_unwind(f);
 }
 
+/// Convert a (possibly-null) C string pointer to an owned `String`.
+///
+/// # Safety
+/// If `p` is non-null it must point to a valid NUL-terminated C string
+/// for the duration of this call. The SDK guarantees this for all `msg`
+/// arguments within a callback invocation.
 unsafe fn cstr(p: *const c_char) -> String {
     if p.is_null() {
         return String::new();
