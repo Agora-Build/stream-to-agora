@@ -2,8 +2,7 @@
 mod sys;
 mod error;
 mod observer;
+mod session;
 
 pub use error::AgoraError;
-
-// Re-exported as the later tasks add them:
-//   mod session;   pub use session::{Session, SessionConfig};
+pub use session::{Session, SessionConfig};
