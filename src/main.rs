@@ -7,6 +7,8 @@
 //! Phase 3: arbitrary file via ffmpeg pipeline.
 //! Phase 4: https / rtmp / rtsp inputs.
 
+mod agora;
+
 use anyhow::{Result, bail};
 use clap::Parser;
 use std::path::PathBuf;
