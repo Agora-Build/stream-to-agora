@@ -4,13 +4,15 @@ Stream a local file (and later https/rtmp/rtsp) to an Agora RTC channel as a reg
 
 ## Status
 
-**v0.1 — Phase 0: scaffold only.** The CLI parses, validates args, and prints what it would do. No SDK calls yet. The next milestones add the real plumbing.
+**Phase 1: connects.** The CLI joins an Agora RTC channel with the
+supplied token, prints `ready`, and idles until Ctrl-C (or `--duration`).
+No media is streamed yet — that's Phase 2.
 
 | Phase | Milestone | Status |
 |---|---|---|
 | 0 | CLI surface, arg validation | ✅ |
-| 1 | Agora SDK loads, joins channel, logs "ready", idles | ⏳ next |
-| 2 | Stream a static H.264 + AAC file end-to-end | ⏳ |
+| 1 | Agora SDK loads, joins channel, logs "ready", idles | ✅ |
+| 2 | Stream a static H.264 + AAC file end-to-end | ⏳ next |
 | 3 | Arbitrary file via ffmpeg pipeline (any codec ffmpeg decodes) | ⏳ |
 | 4 | Remote sources: `https://`, `rtmp://`, `rtsp://` | ⏳ |
 
@@ -39,6 +41,9 @@ Or download a binary from [Releases](https://github.com/Agora-Build/stream-to-ag
 ```bash
 git clone git@github.com:Agora-Build/stream-to-agora.git
 cd stream-to-agora
+# bindgen needs libclang at build time:
+#   Debian/Ubuntu:  sudo apt-get install -y libclang-dev
+#   macOS:          ships with Xcode command-line tools
 cargo build --release         # CMake fetches the Agora SDK on first build
 # Binary at target/release/stream-to-agora
 ```

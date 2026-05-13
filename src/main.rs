@@ -1,8 +1,9 @@
 //! stream-to-agora — push local files (and later https/rtmp/rtsp) to
 //! an Agora RTC channel.
 //!
-//! Phase 0 (this commit): CLI surface + arg validation, no SDK yet.
-//! Phase 1: connect to channel, log "ready" — proves SDK + token + FFI.
+//! Phase 0: CLI surface + arg validation.
+//! Phase 1 (current): create the SDK service, open an RTC connection,
+//!         log "ready", idle until SIGINT — proves SDK + token + FFI.
 //! Phase 2: stream a static H.264/AAC test file.
 //! Phase 3: arbitrary file via ffmpeg pipeline.
 //! Phase 4: https / rtmp / rtsp inputs.
@@ -170,13 +171,6 @@ fn parse_rtc_user_id(raw: &str) -> ParsedUid {
     ParsedUid { value: raw.to_string(), string_mode: !all_digits }
 }
 
-/// Show the first 8 chars of an app id followed by ellipsis. Logs go
-/// to stdout so don't leak the full id casually.
-fn redact_tail(s: &str) -> String {
-    if s.len() <= 12 { return s.to_string(); }
-    format!("{}…", &s[..12])
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -190,13 +184,6 @@ mod tests {
         assert!(matches!(classify_input("rtmp://example.com/live"),   InputKind::Rtmp));
         assert!(matches!(classify_input("rtsp://cam/stream"),         InputKind::Rtsp));
         assert!(matches!(classify_input("ftp://example.com/x"),       InputKind::Unknown));
-    }
-
-    #[test]
-    fn redact_tail_keeps_short_strings_whole() {
-        assert_eq!(redact_tail("short"), "short");
-        assert_eq!(redact_tail("aaaaaaaaaaaa"), "aaaaaaaaaaaa"); // exactly 12
-        assert_eq!(redact_tail("0123456789abcdef"), "0123456789ab…");
     }
 
     #[test]
