@@ -158,7 +158,7 @@ async fn main() -> Result<()> {
         token: cli.token.clone(),
         connect_timeout: std::time::Duration::from_secs(cli.connect_timeout),
     };
-    let session = agora::Session::connect(&cfg)?;
+    let mut session = agora::Session::connect(&cfg).await?;
 
     println!("ready");
     eprintln!("  channel:   {}", cli.channel);
@@ -267,7 +267,7 @@ async fn main() -> Result<()> {
         eprintln!("  idling — press Ctrl-C to disconnect.");
     }
 
-    session.run()?;            // returns Ok on Shutdown, Err on a fatal conn event
+    session.run().await?;      // returns Ok on Shutdown, Err on a fatal conn event
     eprintln!("disconnected.");
     drop(session);             // explicit: triggers clean SDK teardown
     Ok(())
@@ -332,7 +332,7 @@ async fn pump_h264(
     mut stdout: tokio::process::ChildStdout,
     session_start: std::time::Instant,
     fps_n: u32, fps_d: u32,
-    tx: std::sync::mpsc::Sender<agora::ConnEvent>,
+    tx: tokio::sync::mpsc::UnboundedSender<agora::ConnEvent>,
 ) {
     let mut buf = Vec::with_capacity(256 * 1024);
     let mut tmp = vec![0u8; 64 * 1024];
@@ -387,7 +387,7 @@ async fn pump_h264(
 async fn pump_aac(
     p: agora::audio::EncodedAudioPublisher,
     mut stdout: tokio::process::ChildStdout,
-    tx: std::sync::mpsc::Sender<agora::ConnEvent>,
+    tx: tokio::sync::mpsc::UnboundedSender<agora::ConnEvent>,
 ) {
     let mut buf = Vec::with_capacity(64 * 1024);
     let mut tmp = vec![0u8; 8 * 1024];
@@ -429,7 +429,7 @@ async fn pump_yuv(
     mut stdout: tokio::process::ChildStdout,
     session_start: std::time::Instant,
     fps_n: u32, fps_d: u32, w: u32, h: u32,
-    tx: std::sync::mpsc::Sender<agora::ConnEvent>,
+    tx: tokio::sync::mpsc::UnboundedSender<agora::ConnEvent>,
 ) {
     let need = parse::yuv::frame_bytes(w, h);
     let mut buf = vec![0u8; need];
@@ -465,7 +465,7 @@ async fn pump_pcm(
     p: agora::audio::RawAudioPublisher,
     mut stdout: tokio::process::ChildStdout,
     channels: u32,
-    tx: std::sync::mpsc::Sender<agora::ConnEvent>,
+    tx: tokio::sync::mpsc::UnboundedSender<agora::ConnEvent>,
 ) {
     let sample_rate = 48000u32;
     let samples_per_chunk = sample_rate / 100; // 10 ms

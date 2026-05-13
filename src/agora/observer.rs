@@ -89,8 +89,8 @@ mod tests {
 
 use std::os::raw::{c_char, c_int, c_void};
 use std::panic::catch_unwind;
-use std::sync::mpsc::Sender;
 use std::sync::Mutex;
+use tokio::sync::mpsc::UnboundedSender;
 
 use super::sys;
 
@@ -101,23 +101,23 @@ use super::sys;
 ///
 /// TODO(phase2): when a second simultaneous connection is needed, replace
 /// this global with a connection-keyed map (e.g. `DashMap<conn_id, Sender>`).
-static EVENT_TX: Mutex<Option<Sender<ConnEvent>>> = Mutex::new(None);
+static EVENT_TX: Mutex<Option<UnboundedSender<ConnEvent>>> = Mutex::new(None);
 
 /// Second sender for the renew task. Only fed by the
 /// `on_token_privilege_will_expire` trampoline; not used by any other
 /// callback. None when `--token-renew-cmd` is not set.
-static RENEW_TX: Mutex<Option<Sender<ConnEvent>>> = Mutex::new(None);
+static RENEW_TX: Mutex<Option<UnboundedSender<ConnEvent>>> = Mutex::new(None);
 
 /// Install the channel sender the trampolines will push events into.
 /// Must be called before the observer is registered with the SDK.
-pub(super) fn set_event_sender(tx: Sender<ConnEvent>) {
+pub(super) fn set_event_sender(tx: UnboundedSender<ConnEvent>) {
     *EVENT_TX.lock().unwrap() = Some(tx);
 }
 
 /// Optional second sender for the renew task. The
 /// `on_token_privilege_will_expire` callback emits only to this
 /// sender, so `Session::run` never sees `TokenWillExpire`.
-pub(super) fn set_renew_sender(tx: Sender<ConnEvent>) {
+pub(super) fn set_renew_sender(tx: UnboundedSender<ConnEvent>) {
     *RENEW_TX.lock().unwrap() = Some(tx);
 }
 

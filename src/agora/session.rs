@@ -9,8 +9,11 @@
 
 use std::ffi::CString;
 use std::os::raw::c_void;
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
+use tokio::sync::Notify;
+use tokio::task::JoinHandle;
 
 use super::error::{check, AgoraError};
 use super::observer::{self, ConnEvent, Outcome};
@@ -20,6 +23,30 @@ use super::sys;
 // (they live in the C++ headers, not the C ones, so we spell them out).
 const CHANNEL_PROFILE_LIVE_BROADCASTING: i32 = 1;
 const CLIENT_ROLE_BROADCASTER: i32 = 1;
+
+/// Send + Sync cap holding only the connection handle. Used by the
+/// token-renew task, which lives on its own Tokio worker. The SDK's
+/// `agora_rtc_conn_renew_token` is safe to call from any thread; we
+/// `unsafe impl Send + Sync` to assert that.
+pub struct RenewHandle {
+    conn: *mut c_void,
+}
+unsafe impl Send for RenewHandle {}
+unsafe impl Sync for RenewHandle {}
+
+impl RenewHandle {
+    pub fn renew(&self, new_token: &str) -> Result<(), AgoraError> {
+        renew_token_inner(self.conn, new_token)
+    }
+}
+
+fn renew_token_inner(conn: *mut c_void, new_token: &str) -> Result<(), AgoraError> {
+    let c = std::ffi::CString::new(new_token).map_err(|_| {
+        AgoraError::msg("renew token", "new token contains a NUL byte")
+    })?;
+    let rc = unsafe { sys::agora_rtc_conn_renew_token(conn, c.as_ptr()) };
+    check(rc, "agora_rtc_conn_renew_token")
+}
 
 /// Everything `Session::connect` needs, derived from the CLI in `main.rs`.
 pub struct SessionConfig {
@@ -59,16 +86,23 @@ pub struct Session {
     _token: CString,
     /// `user_id` CString — pinned for the same reason.
     _user_id: CString,
-    rx: Receiver<ConnEvent>,
+    rx: UnboundedReceiver<ConnEvent>,
     /// Sender clone so the SIGINT handler / `--duration` timer can push `Shutdown`.
-    tx: mpsc::Sender<ConnEvent>,
+    tx: UnboundedSender<ConnEvent>,
     /// Connection id reported by `on_connected`.
     pub conn_id: u32,
+    /// Pump tasks select! on this Notify; `Session::run` fires it
+    /// before joining handles, so publishers (moved into pump tasks)
+    /// Drop while `conn` is still alive.
+    cancel: Arc<Notify>,
+    /// JoinHandles for tokio::spawn'd pump tasks. `Session::run`
+    /// takes these and awaits them after notifying cancel.
+    pump_handles: tokio::sync::Mutex<Vec<JoinHandle<()>>>,
 }
 
 
 impl Session {
-    pub fn connect(cfg: &SessionConfig) -> Result<Session, AgoraError> {
+    pub async fn connect(cfg: &SessionConfig) -> Result<Session, AgoraError> {
         // Reject interior NULs up front (before any FFI).
         let app_id = CString::new(cfg.app_id.as_str())
             .map_err(|_| AgoraError::msg("app id", "contains a NUL byte"))?;
@@ -126,7 +160,7 @@ impl Session {
         }
 
         // 3. Observer + event channel.
-        let (tx, rx) = mpsc::channel::<ConnEvent>();
+        let (tx, mut rx) = mpsc::unbounded_channel::<ConnEvent>();
         let tx_clone = tx.clone();
         observer::set_event_sender(tx);
         let mut observer = Box::new(observer::build_observer());
@@ -163,7 +197,7 @@ impl Session {
         let conn_id = loop {
             let remaining = deadline.saturating_duration_since(std::time::Instant::now());
             if remaining.is_zero() {
-                // Treat zero-remaining the same as RecvTimeoutError::Timeout: full teardown, return.
+                // Treat zero-remaining the same as Elapsed: full teardown, return.
                 observer::clear_event_sender();
                 unsafe {
                     sys::agora_rtc_conn_disconnect(conn);
@@ -177,9 +211,9 @@ impl Session {
                      — check app id / token / channel / network",
                     cfg.connect_timeout)));
             }
-            match rx.recv_timeout(remaining) {
-                Ok(ConnEvent::Connected { conn_id }) => break conn_id,
-                Ok(other) => match observer::outcome_for(&other) {
+            match tokio::time::timeout(remaining, rx.recv()).await {
+                Ok(Some(ConnEvent::Connected { conn_id })) => break conn_id,
+                Ok(Some(other)) => match observer::outcome_for(&other) {
                     Outcome::Fatal { message } => {
                         observer::clear_event_sender();
                         unsafe {
@@ -197,25 +231,7 @@ impl Session {
                     // Treat both as benign noise and keep waiting.
                     _ => continue,
                 },
-                Err(RecvTimeoutError::Timeout) => {
-                    observer::clear_event_sender();
-                    unsafe {
-                        sys::agora_rtc_conn_disconnect(conn);
-                        let _ = sys::agora_rtc_conn_unregister_observer(conn);
-                        sys::agora_rtc_conn_destroy(conn);
-                        sys::agora_media_node_factory_destroy(factory);
-                        sys::agora_service_release(svc);
-                    }
-                    return Err(AgoraError::msg(
-                        "connect",
-                        format!(
-                            "timed out after {:?} waiting to connect \
-                             — check app id / token / channel / network",
-                            cfg.connect_timeout
-                        ),
-                    ));
-                }
-                Err(RecvTimeoutError::Disconnected) => {
+                Ok(None) => {
                     observer::clear_event_sender();
                     unsafe {
                         sys::agora_rtc_conn_disconnect(conn);
@@ -225,6 +241,20 @@ impl Session {
                         sys::agora_service_release(svc);
                     }
                     return Err(AgoraError::msg("connect", "event channel closed unexpectedly"));
+                }
+                Err(_elapsed) => {
+                    observer::clear_event_sender();
+                    unsafe {
+                        sys::agora_rtc_conn_disconnect(conn);
+                        let _ = sys::agora_rtc_conn_unregister_observer(conn);
+                        sys::agora_rtc_conn_destroy(conn);
+                        sys::agora_media_node_factory_destroy(factory);
+                        sys::agora_service_release(svc);
+                    }
+                    return Err(AgoraError::msg("connect", format!(
+                        "timed out after {:?} waiting to connect \
+                         — check app id / token / channel / network",
+                        cfg.connect_timeout)));
                 }
             }
         };
@@ -241,13 +271,15 @@ impl Session {
             rx,
             tx: tx_clone,
             conn_id,
+            cancel: Arc::new(Notify::new()),
+            pump_handles: tokio::sync::Mutex::new(Vec::new()),
         })
     }
 
     /// Hand out a clonable sender so the SIGINT handler (and a `--duration`
     /// timer) can push `ConnEvent::Shutdown` into the same channel `run`
     /// listens on.
-    pub fn sender(&self) -> mpsc::Sender<ConnEvent> {
+    pub fn sender(&self) -> UnboundedSender<ConnEvent> {
         self.tx.clone()
     }
 
@@ -266,22 +298,64 @@ impl Session {
         super::publisher::create_video(self.svc, self.conn, self.factory, mode)
     }
 
-    /// Block until a `Shutdown` event arrives (clean, exit 0) or a fatal
-    /// connection event arrives (returns `Err`, caller exits non-zero).
-    pub fn run(&self) -> Result<(), AgoraError> {
-        loop {
-            match self.rx.recv() {
-                Ok(ev) => match observer::outcome_for(&ev) {
-                    Outcome::Stop => return Ok(()),
+    /// Block on the event channel until Shutdown (Ok) or a fatal event
+    /// (Err). Before returning, fire the cancellation Notify so pump
+    /// tasks exit promptly, then await every registered pump JoinHandle
+    /// so publisher Drop runs on a live conn.
+    pub async fn run(&mut self) -> Result<(), AgoraError> {
+        let outcome = loop {
+            match self.rx.recv().await {
+                Some(ev) => match observer::outcome_for(&ev) {
+                    Outcome::Stop => break Ok(()),
                     Outcome::Fatal { message } => {
-                        return Err(AgoraError::msg("connection", message))
+                        break Err(AgoraError::msg("connection", message));
                     }
-                    Outcome::Ready { .. } => continue, // shouldn't recur; ignore
+                    Outcome::Ready { .. } |
                     Outcome::Continue => continue,
                 },
-                Err(_) => return Ok(()), // all senders dropped — treat as shutdown
+                None => break Ok(()), // all senders dropped — treat as Shutdown
             }
+        };
+
+        // Notify pumps + renew task to exit; await their JoinHandles.
+        self.cancel.notify_waiters();
+        let mut handles = self.pump_handles.lock().await;
+        for h in handles.drain(..) {
+            let _ = h.await;
         }
+
+        outcome
+    }
+
+    /// Clone the cancellation Notify so pump / renew tasks can `select!` on it.
+    pub fn cancel_signal(&self) -> Arc<Notify> {
+        self.cancel.clone()
+    }
+
+    /// Register a pump task's JoinHandle. `Session::run` awaits all
+    /// registered handles before returning, so publishers Drop on a
+    /// live connection.
+    pub async fn register_pump(&self, h: JoinHandle<()>) {
+        self.pump_handles.lock().await.push(h);
+    }
+
+    /// Hand out a thread-safe cap for calling `agora_rtc_conn_renew_token`.
+    /// `Session` itself is `!Send` (raw pointer fields), so the renew task
+    /// (which lives on its own Tokio worker) can't own a `&Session`.
+    pub fn renew_handle(&self) -> RenewHandle {
+        RenewHandle { conn: self.conn }
+    }
+
+    /// Direct renew (for tests / callers that already have `&self`).
+    pub fn renew_token(&self, new_token: &str) -> Result<(), AgoraError> {
+        renew_token_inner(self.conn, new_token)
+    }
+
+    /// Optional second event sender for the renew task. Forwarded into
+    /// `observer::set_renew_sender`. Called by main.rs once during startup
+    /// when `--token-renew-cmd` is set.
+    pub fn set_renew_sender(&self, tx: UnboundedSender<ConnEvent>) {
+        super::observer::set_renew_sender(tx);
     }
 }
 
