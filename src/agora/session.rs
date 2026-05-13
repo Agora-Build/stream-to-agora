@@ -48,10 +48,6 @@ pub struct Session {
     pub conn_id: u32,
 }
 
-// SAFETY: The SDK owns the thread that calls observer callbacks; we coordinate
-// access through the global EVENT_TX mutex. The raw pointers are opaque
-// handles that we never share between threads without SDK coordination.
-unsafe impl Send for Session {}
 
 impl Session {
     pub fn connect(cfg: &SessionConfig) -> Result<Session, AgoraError> {
