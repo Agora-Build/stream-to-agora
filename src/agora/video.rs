@@ -172,15 +172,6 @@ impl EncodedVideoPublisher {
 
 impl Drop for EncodedVideoPublisher {
     fn drop(&mut self) {
-        // TODO(phase3): publishers are moved into tokio::spawn'd pump tasks
-        // in main.rs. If a pump task is still running when Session::drop runs
-        // (e.g. --loop with SIGINT), Session destroys `conn` BEFORE the pump
-        // task's tokio runtime is shut down → this Drop dereferences a freed
-        // conn pointer. Benign in practice for the single-shot CLI because
-        // the process exits seconds later, but is real UAF and blocks a
-        // reusable Session. Fix: wire a tokio::CancellationToken that
-        // Session::Drop fires + tokio::join the pump handles before the
-        // SDK teardown runs.
         unsafe {
             let local = sys::agora_rtc_conn_get_local_user(self.conn);
             let _ = sys::agora_local_user_unpublish_video(local, self.track);
@@ -226,7 +217,6 @@ impl RawVideoPublisher {
 
 impl Drop for RawVideoPublisher {
     fn drop(&mut self) {
-        // TODO(phase3): same lifetime caveat as EncodedVideoPublisher::drop above.
         unsafe {
             let local = sys::agora_rtc_conn_get_local_user(self.conn);
             let _ = sys::agora_local_user_unpublish_video(local, self.track);
