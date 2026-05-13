@@ -2,11 +2,10 @@
 //! an Agora RTC channel.
 //!
 //! Phase 0: CLI surface + arg validation.
-//! Phase 1 (current): create the SDK service, open an RTC connection,
-//!         log "ready", idle until SIGINT — proves SDK + token + FFI.
-//! Phase 2: stream a static H.264/AAC test file.
-//! Phase 3: arbitrary file via ffmpeg pipeline.
-//! Phase 4: https / rtmp / rtsp inputs.
+//! Phase 1: create the SDK service, open an RTC connection, log "ready", idle.
+//! Phase 2 (current): publish one audio + one video track from any file
+//!         ffmpeg can read; --loop for steady-state, --duration for bounded.
+//! Phase 3: remote sources (https / rtmp / rtsp inputs).
 
 mod agora;
 mod ffmpeg;

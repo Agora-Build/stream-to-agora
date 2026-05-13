@@ -162,6 +162,16 @@ main() {
         ;;
     esac
   fi
+
+  # Phase 2+ requires ffmpeg/ffprobe at runtime.
+  if ! command -v ffmpeg >/dev/null 2>&1 || ! command -v ffprobe >/dev/null 2>&1; then
+    echo ""
+    echo "Note: stream-to-agora requires 'ffmpeg' and 'ffprobe' on PATH (Phase 2+)."
+    case "$(uname -s)" in
+      Linux*)   echo "  sudo apt-get install -y ffmpeg" ;;
+      Darwin*)  echo "  brew install ffmpeg" ;;
+    esac
+  fi
 }
 
 main "$@"

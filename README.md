@@ -4,23 +4,29 @@ Stream a local file (and later https/rtmp/rtsp) to an Agora RTC channel as a reg
 
 ## Status
 
-**Phase 1: connects.** The CLI joins an Agora RTC channel with the
-supplied token, prints `ready`, and idles until Ctrl-C (or `--duration`).
-No media is streamed yet — that's Phase 2.
+**Phase 2: publishes.** The CLI runs ffmpeg against any input file it can
+read, decides per-codec whether to passthrough encoded frames (H.264 / H.265
+/ VP8 / VP9 / AV1 / mjpeg video; AAC / Opus / G.711 / G.722 audio) or
+decode to raw YUV+PCM, and publishes one audio + one video track to the
+RTC channel. `--loop` for steady-state publish; `--duration` for bounded
+soak runs.
 
 | Phase | Milestone | Status |
 |---|---|---|
 | 0 | CLI surface, arg validation | ✅ |
 | 1 | Agora SDK loads, joins channel, logs "ready", idles | ✅ |
-| 2 | Stream a static H.264 + AAC file end-to-end | ⏳ next |
-| 3 | Arbitrary file via ffmpeg pipeline (any codec ffmpeg decodes) | ⏳ |
-| 4 | Remote sources: `https://`, `rtmp://`, `rtsp://` | ⏳ |
+| 2 | Publish a local file via ffmpeg (any codec ffmpeg reads) | ✅ |
+| 3 | Remote sources: `https://`, `rtmp://`, `rtsp://` | ⏳ next |
 
 ## Platforms
 
 Linux (x86_64, aarch64) and macOS (x86_64, aarch64). Windows is not on the roadmap; PRs welcome.
 
 ## Install
+
+> **Runtime requirement:** `ffmpeg` and `ffprobe` must be on `PATH`
+> (Phase 2+; not needed for Phase 1's connect-only mode).
+> Debian/Ubuntu: `sudo apt-get install -y ffmpeg`. macOS: `brew install ffmpeg`.
 
 ```bash
 npm install -g @agora-build/stream-to-agora
@@ -61,7 +67,7 @@ stream-to-agora ./demo.mp4 \
   --token       "$TOKEN"
 ```
 
-## Usage (planned)
+## Usage
 
 ```bash
 # Local file (after Phase 3)
@@ -92,16 +98,22 @@ stream-to-agora does NOT read atem's encrypted credentials store or active proje
 ## Architecture
 
 ```
-┌─────────────┐   raw YUV    ┌──────────────┐   conn_connect / send_video   ┌────────┐
-│   ffmpeg    │ ───────────→ │ stream-to-   │ ───────────────────────────→ │ Agora  │
-│  (decoder)  │   raw PCM    │ agora (Rust) │   send_audio_pcm              │  RTC   │
-└─────────────┘ ───────────→ │              │ ───────────────────────────→ └────────┘
-                              └──────┬───────┘
-                                     │ FFI (extern "C")
-                                     ▼
-                            libagora_rtc_sdk.so   ← Agora NG SDK's flat C API
-                                                    (include/c/api2/…)
+┌──────────────┐  encoded NALUs+ADTS   ┌──────────────┐  encoded sender  ┌────────┐
+│   ffmpeg     │ ────────────────────► │ stream-to-   │ ───────────────► │ Agora  │
+│ (demux only) │                       │ agora (Rust) │                  │  RTC   │
+│  -c copy     │                       │              │                  │        │
+└──────────────┘                       │              │                  └────────┘
+                                       │   matches    │
+┌──────────────┐    raw YUV+PCM        │  CodecMode   │   raw sender     ┌────────┐
+│   ffmpeg     │ ────────────────────► │  on startup  │ ───────────────► │ Agora  │
+│ (decode)     │                       │              │                  │  RTC   │
+│ -pix_fmt …   │                       └──────────────┘                  └────────┘
+└──────────────┘
 ```
+
+Mode is chosen at startup by `ffprobe`'ing the input: if both streams use
+codecs Agora's encoded senders accept, ffmpeg is launched with `-c copy`
+(zero-CPU demux); otherwise ffmpeg decodes and we push raw.
 
 The Agora NG SDK ships a flat C API (`agora_service_create`, `agora_rtc_conn_connect`, `agora_video_frame_sender_send`, …), so Rust links it directly via `extern "C"` — no C++ shim.
 
