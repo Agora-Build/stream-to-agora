@@ -1,0 +1,159 @@
+//! Codec-mode decision + the public publisher enums.
+//!
+//! The publisher enums are placeholder unit-variants in this task —
+//! Task 11 replaces them with real variants holding the per-mode
+//! publisher structs from Tasks 9 and 10.
+
+use crate::ffmpeg::MediaInfo;
+
+/// Which Agora sender path we use. Picked once on startup based on the
+/// input's codec ids — see `decide()`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CodecMode {
+    /// Both streams use codecs Agora's encoded-frame senders accept;
+    /// ffmpeg runs with `-c copy` (demux only).
+    Encoded,
+    /// At least one stream's codec isn't in Agora's encoded set;
+    /// ffmpeg decodes to raw YUV+PCM and we push via the raw senders.
+    Raw,
+}
+
+/// The video codec names ffprobe reports for codecs we can publish via
+/// `agora_video_encoded_image_sender_send` **AND** for which our current
+/// ffmpeg pipeline output format (`-f h264`, Annex-B) is correct.
+///
+/// Phase 2 ships with H.264 only on the encoded path. Other codecs Agora's
+/// encoded sender technically supports (H.265/VP8/VP9/AV1/mjpeg) need
+/// codec-specific ffmpeg muxers (-f hevc / -f ivf / -f ogg / -f mjpeg …)
+/// and matching `encoded_video_frame_info.codec_type` values; that's a
+/// Phase 3 expansion. Sending VP9 bytes wrapped in an H.264 muxer just
+/// makes ffmpeg error out and emit zero bytes — silent failure.
+const VIDEO_ENCODED_OK: &[&str] = &["h264"];
+
+/// Audio codec names for the encoded path. Same restriction as video:
+/// Phase 2's pipeline writes `-f adts`, which only accepts AAC. Everything
+/// else (Opus / PCMA / PCMU / G.722) falls through to the Raw path and
+/// gets decoded → s16le → pushed via `agora_audio_pcm_data_sender_send`,
+/// which works for every codec ffmpeg can decode.
+const AUDIO_ENCODED_OK: &[&str] = &["aac"];
+
+/// Pure mode-decision. Encoded if *both* present streams use accepted
+/// codecs; otherwise Raw. A video-only or audio-only input takes only
+/// the present stream's verdict.
+pub fn decide(info: &MediaInfo) -> CodecMode {
+    let video_ok = match &info.video {
+        Some(v) => VIDEO_ENCODED_OK.contains(&v.codec_name.as_str()),
+        None => true, // no video — neutral
+    };
+    let audio_ok = match &info.audio {
+        Some(a) => AUDIO_ENCODED_OK.contains(&a.codec_name.as_str()),
+        None => true,
+    };
+    if video_ok && audio_ok { CodecMode::Encoded } else { CodecMode::Raw }
+}
+
+use std::os::raw::c_void;
+
+use super::audio::{create_encoded as create_audio_encoded, create_raw as create_audio_raw,
+                   EncodedAudioPublisher, RawAudioPublisher};
+use super::error::AgoraError;
+use super::video::{create_encoded as create_video_encoded, create_raw as create_video_raw,
+                   EncodedVideoPublisher, RawVideoPublisher};
+
+pub enum AudioPublisher {
+    Encoded(EncodedAudioPublisher),
+    Raw(RawAudioPublisher),
+}
+
+pub enum VideoPublisher {
+    Encoded(EncodedVideoPublisher),
+    Raw(RawVideoPublisher),
+}
+
+impl AudioPublisher {
+    pub fn publish(&self) -> Result<(), AgoraError> {
+        match self {
+            AudioPublisher::Encoded(p) => p.publish(),
+            AudioPublisher::Raw(p) => p.publish(),
+        }
+    }
+    pub fn unpublish(&self) -> Result<(), AgoraError> {
+        match self {
+            AudioPublisher::Encoded(p) => p.unpublish(),
+            AudioPublisher::Raw(p) => p.unpublish(),
+        }
+    }
+}
+
+impl VideoPublisher {
+    pub fn publish(&self) -> Result<(), AgoraError> {
+        match self {
+            VideoPublisher::Encoded(p) => p.publish(),
+            VideoPublisher::Raw(p) => p.publish(),
+        }
+    }
+    pub fn unpublish(&self) -> Result<(), AgoraError> {
+        match self {
+            VideoPublisher::Encoded(p) => p.unpublish(),
+            VideoPublisher::Raw(p) => p.unpublish(),
+        }
+    }
+}
+
+/// Dispatch helper invoked from `Session::create_audio_publisher`.
+pub(super) fn create_audio(svc: *mut c_void, conn: *mut c_void, factory: *mut c_void, mode: CodecMode)
+    -> Result<AudioPublisher, AgoraError>
+{
+    match mode {
+        CodecMode::Encoded => create_audio_encoded(svc, conn, factory).map(AudioPublisher::Encoded),
+        CodecMode::Raw     => create_audio_raw(svc, conn, factory).map(AudioPublisher::Raw),
+    }
+}
+
+/// Dispatch helper invoked from `Session::create_video_publisher`.
+pub(super) fn create_video(svc: *mut c_void, conn: *mut c_void, factory: *mut c_void, mode: CodecMode)
+    -> Result<VideoPublisher, AgoraError>
+{
+    match mode {
+        CodecMode::Encoded => create_video_encoded(svc, conn, factory).map(VideoPublisher::Encoded),
+        CodecMode::Raw     => create_video_raw(svc, conn, factory).map(VideoPublisher::Raw),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ffmpeg::probe::parse_probe_json;
+
+    const H264_AAC: &[u8] = include_bytes!("../../tests/fixtures/probe-h264-aac.json");
+    const VP9_OPUS: &[u8] = include_bytes!("../../tests/fixtures/probe-vp9-opus.json");
+    const MPEG2_MP3: &[u8] = include_bytes!("../../tests/fixtures/probe-mpeg2-mp3.json");
+
+    fn info(json: &[u8]) -> MediaInfo {
+        parse_probe_json(json).unwrap()
+    }
+
+    #[test]
+    fn h264_aac_picks_encoded()  { assert_eq!(decide(&info(H264_AAC)),  CodecMode::Encoded); }
+    #[test]
+    fn vp9_opus_picks_raw()      { assert_eq!(decide(&info(VP9_OPUS)),  CodecMode::Raw); }
+    #[test]
+    fn mpeg2_mp3_picks_raw()     { assert_eq!(decide(&info(MPEG2_MP3)), CodecMode::Raw); }
+
+    #[test]
+    fn video_only_input_uses_video_verdict() {
+        let mut i = info(H264_AAC);
+        i.audio = None;
+        assert_eq!(decide(&i), CodecMode::Encoded);
+        let mut i = info(MPEG2_MP3);
+        i.audio = None;
+        assert_eq!(decide(&i), CodecMode::Raw);
+    }
+
+    #[test]
+    fn audio_unsupported_forces_raw_even_if_video_ok() {
+        let mut i = info(H264_AAC);
+        i.audio.as_mut().unwrap().codec_name = "flac".into();
+        assert_eq!(decide(&i), CodecMode::Raw);
+    }
+}

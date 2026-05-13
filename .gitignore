@@ -12,3 +12,7 @@ agora_cache.db
 agoradns.dat
 agorareport.dat
 common_resource/
+
+# Brainstorming / planning artifacts produced by the superpowers skills.
+# Kept local for the design+plan workflow; not shipped to the repo.
+docs/superpowers/
