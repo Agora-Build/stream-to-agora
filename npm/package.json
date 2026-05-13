@@ -32,11 +32,9 @@
   },
   "homepage": "https://github.com/Agora-Build/stream-to-agora#readme",
   "os": [
-    "linux",
-    "darwin"
+    "linux"
   ],
   "cpu": [
-    "x64",
-    "arm64"
+    "x64"
   ]
 }
