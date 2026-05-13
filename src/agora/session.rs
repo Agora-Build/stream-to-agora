@@ -41,6 +41,10 @@ pub struct Session {
     /// Boxed so its address is stable; the SDK holds the pointer we pass to
     /// `agora_rtc_conn_register_observer`.
     _observer: Box<sys::rtc_conn_observer>,
+    /// `app_id` CString — the SDK likely retains the pointer from
+    /// `agora_service_config.app_id` past `initialize()`; keep it alive
+    /// for the lifetime of `svc`. Underscored — never read by Rust.
+    _app_id: CString,
     rx: Receiver<ConnEvent>,
     /// Sender clone so the SIGINT handler / `--duration` timer can push `Shutdown`.
     tx: mpsc::Sender<ConnEvent>,
@@ -118,7 +122,7 @@ impl Session {
         if let Err(e) = check(rc, "agora_rtc_conn_connect") {
             observer::clear_event_sender();
             unsafe {
-                sys::agora_rtc_conn_unregister_observer(conn);
+                let _ = sys::agora_rtc_conn_unregister_observer(conn);
                 sys::agora_rtc_conn_destroy(conn);
                 sys::agora_service_release(svc);
             }
@@ -126,28 +130,47 @@ impl Session {
         }
 
         // 5. Wait for on_connected (or a fatal event, or timeout).
+        let deadline = std::time::Instant::now() + cfg.connect_timeout;
         let conn_id = loop {
-            match rx.recv_timeout(cfg.connect_timeout) {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                // Treat zero-remaining the same as RecvTimeoutError::Timeout: full teardown, return.
+                observer::clear_event_sender();
+                unsafe {
+                    sys::agora_rtc_conn_disconnect(conn);
+                    let _ = sys::agora_rtc_conn_unregister_observer(conn);
+                    sys::agora_rtc_conn_destroy(conn);
+                    sys::agora_service_release(svc);
+                }
+                return Err(AgoraError::msg("connect", format!(
+                    "timed out after {:?} waiting to connect \
+                     — check app id / token / channel / network",
+                    cfg.connect_timeout)));
+            }
+            match rx.recv_timeout(remaining) {
                 Ok(ConnEvent::Connected { conn_id }) => break conn_id,
                 Ok(other) => match observer::outcome_for(&other) {
                     Outcome::Fatal { message } => {
                         observer::clear_event_sender();
                         unsafe {
                             sys::agora_rtc_conn_disconnect(conn);
-                            sys::agora_rtc_conn_unregister_observer(conn);
+                            let _ = sys::agora_rtc_conn_unregister_observer(conn);
                             sys::agora_rtc_conn_destroy(conn);
                             sys::agora_service_release(svc);
                         }
                         return Err(AgoraError::msg("connect", message));
                     }
-                    // Connecting/Reconnecting noise isn't surfaced as events here, but be defensive:
+                    // Outcome::Ready was matched above; Outcome::Stop can't arrive
+                    // here because Session.tx (the only handle to the shutdown
+                    // sender) doesn't exist until `connect()` returns Ok.
+                    // Treat both as benign noise and keep waiting.
                     _ => continue,
                 },
                 Err(RecvTimeoutError::Timeout) => {
                     observer::clear_event_sender();
                     unsafe {
                         sys::agora_rtc_conn_disconnect(conn);
-                        sys::agora_rtc_conn_unregister_observer(conn);
+                        let _ = sys::agora_rtc_conn_unregister_observer(conn);
                         sys::agora_rtc_conn_destroy(conn);
                         sys::agora_service_release(svc);
                     }
@@ -164,7 +187,7 @@ impl Session {
                     observer::clear_event_sender();
                     unsafe {
                         sys::agora_rtc_conn_disconnect(conn);
-                        sys::agora_rtc_conn_unregister_observer(conn);
+                        let _ = sys::agora_rtc_conn_unregister_observer(conn);
                         sys::agora_rtc_conn_destroy(conn);
                         sys::agora_service_release(svc);
                     }
@@ -173,7 +196,7 @@ impl Session {
             }
         };
 
-        Ok(Session { svc, conn, _observer: observer, rx, tx: tx_clone, conn_id })
+        Ok(Session { svc, conn, _observer: observer, _app_id: app_id, rx, tx: tx_clone, conn_id })
     }
 
     /// Hand out a clonable sender so the SIGINT handler (and a `--duration`
@@ -210,7 +233,11 @@ impl Drop for Session {
             if rc != 0 {
                 eprintln!("warning: agora_rtc_conn_disconnect returned {rc}");
             }
-            sys::agora_rtc_conn_unregister_observer(self.conn);
+            // unregister_observer returns i32; per SDK docs it doesn't fail, and
+            // even if it did there's nothing meaningful Drop could do — explicit
+            // discard for consistency with how disconnect/release returns are
+            // inspected above.
+            let _ = sys::agora_rtc_conn_unregister_observer(self.conn);
             sys::agora_rtc_conn_destroy(self.conn);
             let rc = sys::agora_service_release(self.svc);
             if rc != 0 {
