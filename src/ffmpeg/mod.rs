@@ -3,5 +3,7 @@
 //! frames on stdout/extra-fd pipes.
 
 pub mod probe;
+pub mod pipeline;
 
 pub use probe::{probe, MediaInfo, Stream};
+pub use pipeline::Pipeline;
