@@ -75,11 +75,50 @@ struct Cli {
     /// then disconnect and exit. Omit to idle until Ctrl-C.
     #[arg(long)]
     duration: Option<u64>,
+
+    /// Maximum reconnect attempts for RTMP/RTSP sources before giving up.
+    /// HTTP/HTTPS reconnect is handled by ffmpeg's built-in `-reconnect`
+    /// flags and isn't bounded by this counter. Set to 0 to disable
+    /// respawn entirely.
+    #[arg(long, default_value_t = 5)]
+    reconnect_attempts: u32,
+
+    /// Shell command that prints a fresh Agora RTC token on stdout when
+    /// the SDK signals the current token is about to expire. The entire
+    /// trimmed stdout becomes the new token. Supports `{channel}` and
+    /// `{rtc_user_id}` placeholders that are substituted before
+    /// running. Example:
+    ///   atem token rtc create --channel {channel} --rtc-user-id {rtc_user_id} | awk '/^RTC Token/{getline; print; exit}'
+    #[arg(long)]
+    token_renew_cmd: Option<String>,
+
+    /// HTTP header injected into ffmpeg's request when the input is an
+    /// http(s):// URL. Repeatable: `--http-header 'Cookie: a=b'
+    /// --http-header 'Authorization: Bearer …'`. Values must contain a
+    /// colon and must not contain CR/LF.
+    #[arg(long = "http-header", action = clap::ArgAction::Append)]
+    http_header: Vec<String>,
+
+    /// HTTP User-Agent string passed to ffmpeg for http(s):// inputs.
+    #[arg(long)]
+    user_agent: Option<String>,
+
+    /// RTSP transport for rtsp:// inputs. UDP is the default (matches
+    /// ffmpeg's default). Set to `tcp` for cameras behind a UDP-blocking
+    /// NAT/firewall.
+    #[arg(long, value_parser = ["tcp", "udp", "http"])]
+    rtsp_transport: Option<String>,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+
+    for h in &cli.http_header {
+        if let Err(e) = validate_http_header(h) {
+            anyhow::bail!(e);
+        }
+    }
 
     if cli.audio_only && cli.video_only {
         bail!("--audio-only and --video-only are mutually exclusive");
@@ -89,16 +128,23 @@ async fn main() -> Result<()> {
     }
 
     let input_kind = classify_input(&cli.input);
-    if matches!(input_kind, InputKind::LocalFile) {
-        let path = PathBuf::from(&cli.input);
-        if !path.exists() {
-            bail!("Input file does not exist: {}", path.display());
+    match input_kind {
+        InputKind::LocalFile => {
+            let path = PathBuf::from(&cli.input);
+            if !path.exists() {
+                bail!("Input file does not exist: {}", path.display());
+            }
         }
-    } else {
-        bail!(
-            "Input '{}' looks like a {:?}; only local files are supported in Phase 2. \
-             Remote sources are Phase 3.", cli.input, input_kind,
-        );
+        InputKind::Https | InputKind::Rtmp | InputKind::Rtsp => {
+            // remote sources flow through to ffmpeg
+        }
+        InputKind::Unknown => {
+            bail!(
+                "Input '{}' uses an unsupported URL scheme; \
+                 supported: https://, http://, rtmp://, rtsp://, or a local file path.",
+                cli.input,
+            );
+        }
     }
 
     let uid = parse_rtc_user_id(&cli.rtc_user_id);
@@ -244,6 +290,26 @@ fn parse_rtc_user_id(raw: &str) -> ParsedUid {
     }
     let all_digits = !raw.is_empty() && raw.bytes().all(|b| b.is_ascii_digit());
     ParsedUid { value: raw.to_string(), string_mode: !all_digits }
+}
+
+/// Validate one `--http-header` value: must contain a `:`, must not
+/// contain any CR or LF (RFC-7230 forbids them inside a header line).
+fn validate_http_header(s: &str) -> Result<(), String> {
+    if !s.contains(':') {
+        return Err(format!("--http-header `{s}` missing colon (expected `Key: Value`)"));
+    }
+    if s.contains('\r') || s.contains('\n') {
+        return Err(format!("--http-header `{s}` contains a line break (CRLF injection)"));
+    }
+    Ok(())
+}
+
+/// Substitute `{channel}` and `{rtc_user_id}` placeholders in the
+/// `--token-renew-cmd` template.
+fn substitute_token_cmd(template: &str, channel: &str, rtc_user_id: &str) -> String {
+    template
+        .replace("{channel}", channel)
+        .replace("{rtc_user_id}", rtc_user_id)
 }
 
 async fn pump_h264(
@@ -445,5 +511,46 @@ mod tests {
         let p = parse_rtc_user_id("s/alice");
         assert_eq!(p.value, "alice");
         assert!(p.string_mode);
+    }
+
+    #[test]
+    fn validate_http_header_ok() {
+        assert!(validate_http_header("Authorization: Bearer eyJabc").is_ok());
+        assert!(validate_http_header("X-Custom:value").is_ok());
+    }
+
+    #[test]
+    fn validate_http_header_rejects_no_colon() {
+        let e = validate_http_header("just-a-key").unwrap_err();
+        assert!(e.contains("colon"));
+    }
+
+    #[test]
+    fn validate_http_header_rejects_linebreaks() {
+        let e = validate_http_header("X-Bad: foo\r\nInjection: bar").unwrap_err();
+        assert!(e.contains("line break"));
+        let e = validate_http_header("X-Bad: foo\nInjection: bar").unwrap_err();
+        assert!(e.contains("line break"));
+    }
+
+    #[test]
+    fn substitute_token_cmd_replaces_placeholders() {
+        let s = substitute_token_cmd(
+            "atem token rtc create --channel {channel} --rtc-user-id {rtc_user_id}",
+            "demo", "42",
+        );
+        assert_eq!(s, "atem token rtc create --channel demo --rtc-user-id 42");
+    }
+
+    #[test]
+    fn substitute_token_cmd_no_placeholders() {
+        let s = substitute_token_cmd("plain command", "x", "y");
+        assert_eq!(s, "plain command");
+    }
+
+    #[test]
+    fn substitute_token_cmd_repeated_placeholder() {
+        let s = substitute_token_cmd("{channel}-{channel}", "demo", "42");
+        assert_eq!(s, "demo-demo");
     }
 }
