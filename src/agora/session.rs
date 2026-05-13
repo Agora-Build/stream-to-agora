@@ -45,6 +45,16 @@ pub struct Session {
     /// `agora_service_config.app_id` past `initialize()`; keep it alive
     /// for the lifetime of `svc`. Underscored — never read by Rust.
     _app_id: CString,
+    /// `channel` CString — pinned past `agora_rtc_conn_connect` in case the
+    /// SDK aliases the pointer for reconnect / logging. Same rationale as
+    /// `_app_id`. Underscored — never read by Rust.
+    _channel: CString,
+    /// `token` CString — pinned for the same reason. Tokens can be rotated
+    /// via `agora_rtc_conn_renew_token` later, but we don't drop the
+    /// original until `Session` itself drops.
+    _token: CString,
+    /// `user_id` CString — pinned for the same reason.
+    _user_id: CString,
     rx: Receiver<ConnEvent>,
     /// Sender clone so the SIGINT handler / `--duration` timer can push `Shutdown`.
     tx: mpsc::Sender<ConnEvent>,
@@ -196,7 +206,7 @@ impl Session {
             }
         };
 
-        Ok(Session { svc, conn, _observer: observer, _app_id: app_id, rx, tx: tx_clone, conn_id })
+        Ok(Session { svc, conn, _observer: observer, _app_id: app_id, _channel: channel, _token: token, _user_id: user_id, rx, tx: tx_clone, conn_id })
     }
 
     /// Hand out a clonable sender so the SIGINT handler (and a `--duration`
