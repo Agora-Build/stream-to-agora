@@ -10,6 +10,7 @@
 
 mod agora;
 mod ffmpeg;
+mod parse;
 
 use anyhow::{Result, bail};
 use clap::Parser;
