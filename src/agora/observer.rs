@@ -74,3 +74,109 @@ mod tests {
         match o { Outcome::Fatal { message } => assert!(message.contains("reason 4")), _ => panic!() }
     }
 }
+
+// ─── FFI glue: event channel + extern "C" trampolines ────────────────────────
+
+use std::os::raw::{c_char, c_int, c_void};
+use std::panic::catch_unwind;
+use std::sync::mpsc::Sender;
+use std::sync::Mutex;
+
+use super::sys;
+
+/// Phase 1 opens exactly one RTC connection per process, and the C
+/// `rtc_conn_observer` struct has no user-data slot, so the trampolines
+/// reach the event channel through this process-global. `Session::connect`
+/// installs the sender before registering the observer and clears it on Drop.
+static EVENT_TX: Mutex<Option<Sender<ConnEvent>>> = Mutex::new(None);
+
+pub(super) fn set_event_sender(tx: Sender<ConnEvent>) {
+    *EVENT_TX.lock().unwrap() = Some(tx);
+}
+pub(super) fn clear_event_sender() {
+    *EVENT_TX.lock().unwrap() = None;
+}
+
+/// Send an event from a callback thread. Never panics, never unwinds.
+fn emit(ev: ConnEvent) {
+    if let Ok(guard) = EVENT_TX.lock() {
+        if let Some(tx) = guard.as_ref() {
+            let _ = tx.send(ev); // receiver gone => nothing to do
+        }
+    }
+}
+
+/// Run a callback body, swallowing any panic (unwinding into C is UB).
+fn guard<F: FnOnce() + std::panic::UnwindSafe>(f: F) {
+    let _ = catch_unwind(f);
+}
+
+unsafe fn cstr(p: *const c_char) -> String {
+    if p.is_null() {
+        return String::new();
+    }
+    unsafe { std::ffi::CStr::from_ptr(p).to_string_lossy().into_owned() }
+}
+
+// bindgen renders all fn-pointer fields as `Option<unsafe extern "C" fn(...)>`,
+// so the trampolines must be `unsafe extern "C" fn` to match.
+// The first parameter is `*mut c_void` (the SDK's opaque connection handle).
+
+unsafe extern "C" fn on_connected(
+    _conn: *mut c_void,
+    info: *const sys::rtc_conn_info,
+    _reason: c_int,
+) {
+    guard(|| {
+        let conn_id = unsafe { info.as_ref().map(|i| i.id as u32).unwrap_or(0) };
+        emit(ConnEvent::Connected { conn_id });
+    });
+}
+
+unsafe extern "C" fn on_disconnected(
+    _conn: *mut c_void,
+    _info: *const sys::rtc_conn_info,
+    reason: c_int,
+) {
+    guard(|| emit(ConnEvent::Disconnected { reason: reason as i32 }));
+}
+
+unsafe extern "C" fn on_connection_lost(
+    _conn: *mut c_void,
+    _info: *const sys::rtc_conn_info,
+) {
+    guard(|| emit(ConnEvent::ConnectionLost));
+}
+
+unsafe extern "C" fn on_connection_failure(
+    _conn: *mut c_void,
+    _info: *const sys::rtc_conn_info,
+    reason: c_int,
+) {
+    guard(|| emit(ConnEvent::Failed { code: reason as i32, msg: String::new() }));
+}
+
+unsafe extern "C" fn on_error(
+    _conn: *mut c_void,
+    error: c_int,
+    msg: *const c_char,
+) {
+    guard(|| {
+        let m = unsafe { cstr(msg) };
+        emit(ConnEvent::Failed { code: error as i32, msg: m });
+    });
+}
+
+/// Build the observer struct: all fields zeroed (= no callback) except the
+/// few Phase 1 cares about. `sys::rtc_conn_observer` derives `Default` via
+/// bindgen (`derive_default(true)`); a zeroed struct of fn pointers means
+/// "no handler", which the SDK tolerates.
+pub(super) fn build_observer() -> sys::rtc_conn_observer {
+    let mut o = sys::rtc_conn_observer::default();
+    o.on_connected = Some(on_connected);
+    o.on_disconnected = Some(on_disconnected);
+    o.on_connection_lost = Some(on_connection_lost);
+    o.on_connection_failure = Some(on_connection_failure);
+    o.on_error = Some(on_error);
+    o
+}
