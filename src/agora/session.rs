@@ -86,9 +86,13 @@ impl Session {
         }
 
         let mut svc_cfg: sys::agora_service_config = unsafe { std::mem::zeroed() };
-        svc_cfg.enable_audio_processor = 0;
+        // Phase 2 needs both audio_processor and video enabled — the SDK
+        // returns NULL from `agora_service_create_custom_audio_track_encoded`
+        // (and friends) with INVALID_STATE when enable_audio_processor=0.
+        // audio_device stays disabled: we don't use a physical mic/speaker.
+        svc_cfg.enable_audio_processor = 1;
         svc_cfg.enable_audio_device = 0;
-        svc_cfg.enable_video = 0;
+        svc_cfg.enable_video = 1;
         svc_cfg.app_id = app_id.as_ptr();
         svc_cfg.area_code = 0xFFFF_FFFF; // AREA_CODE_GLOB
         svc_cfg.channel_profile = CHANNEL_PROFILE_LIVE_BROADCASTING;
