@@ -4,8 +4,8 @@ mod error;
 mod observer;
 mod session;
 mod publisher;
-mod video;
-mod audio;
+pub mod video;
+pub mod audio;
 
 // AgoraError is the error type returned by Session::connect and Session::run.
 // It's re-exported for callers that want to match on it directly; the binary
@@ -14,5 +14,5 @@ mod audio;
 #[allow(unused_imports)]
 pub use error::AgoraError;
 pub use observer::ConnEvent;
-pub use publisher::{AudioPublisher, CodecMode, VideoPublisher};
+pub use publisher::{decide, AudioPublisher, CodecMode, VideoPublisher};
 pub use session::{Session, SessionConfig};
