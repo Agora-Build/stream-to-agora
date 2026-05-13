@@ -41,6 +41,10 @@ pub struct Session {
     /// Boxed so its address is stable; the SDK holds the pointer we pass to
     /// `agora_rtc_conn_register_observer`.
     _observer: Box<sys::rtc_conn_observer>,
+    /// Media-node factory; needed to create the encoded/raw senders that
+    /// back AudioPublisher / VideoPublisher. Owned by Session; destroyed
+    /// before service release in Drop.
+    factory: *mut c_void,
     /// `app_id` CString — the SDK likely retains the pointer from
     /// `agora_service_config.app_id` past `initialize()`; keep it alive
     /// for the lifetime of `svc`. Underscored — never read by Rust.
@@ -95,6 +99,12 @@ impl Session {
             return Err(e);
         }
 
+        let factory = unsafe { sys::agora_service_create_media_node_factory(svc) };
+        if factory.is_null() {
+            unsafe { sys::agora_service_release(svc); }
+            return Err(AgoraError::null("agora_service_create_media_node_factory"));
+        }
+
         // 2. RTC connection.
         let mut conn_cfg: sys::rtc_conn_config = unsafe { std::mem::zeroed() };
         conn_cfg.auto_subscribe_audio = 0;
@@ -104,7 +114,10 @@ impl Session {
         conn_cfg.channel_profile = CHANNEL_PROFILE_LIVE_BROADCASTING;
         let conn = unsafe { sys::agora_rtc_conn_create(svc, &conn_cfg) };
         if conn.is_null() {
-            unsafe { sys::agora_service_release(svc) };
+            unsafe {
+                sys::agora_media_node_factory_destroy(factory);
+                sys::agora_service_release(svc);
+            }
             return Err(AgoraError::null("agora_rtc_conn_create"));
         }
 
@@ -120,6 +133,7 @@ impl Session {
             observer::clear_event_sender();
             unsafe {
                 sys::agora_rtc_conn_destroy(conn);
+                sys::agora_media_node_factory_destroy(factory);
                 sys::agora_service_release(svc);
             }
             return Err(e);
@@ -134,6 +148,7 @@ impl Session {
             unsafe {
                 let _ = sys::agora_rtc_conn_unregister_observer(conn);
                 sys::agora_rtc_conn_destroy(conn);
+                sys::agora_media_node_factory_destroy(factory);
                 sys::agora_service_release(svc);
             }
             return Err(e);
@@ -150,6 +165,7 @@ impl Session {
                     sys::agora_rtc_conn_disconnect(conn);
                     let _ = sys::agora_rtc_conn_unregister_observer(conn);
                     sys::agora_rtc_conn_destroy(conn);
+                    sys::agora_media_node_factory_destroy(factory);
                     sys::agora_service_release(svc);
                 }
                 return Err(AgoraError::msg("connect", format!(
@@ -166,6 +182,7 @@ impl Session {
                             sys::agora_rtc_conn_disconnect(conn);
                             let _ = sys::agora_rtc_conn_unregister_observer(conn);
                             sys::agora_rtc_conn_destroy(conn);
+                            sys::agora_media_node_factory_destroy(factory);
                             sys::agora_service_release(svc);
                         }
                         return Err(AgoraError::msg("connect", message));
@@ -182,6 +199,7 @@ impl Session {
                         sys::agora_rtc_conn_disconnect(conn);
                         let _ = sys::agora_rtc_conn_unregister_observer(conn);
                         sys::agora_rtc_conn_destroy(conn);
+                        sys::agora_media_node_factory_destroy(factory);
                         sys::agora_service_release(svc);
                     }
                     return Err(AgoraError::msg(
@@ -199,6 +217,7 @@ impl Session {
                         sys::agora_rtc_conn_disconnect(conn);
                         let _ = sys::agora_rtc_conn_unregister_observer(conn);
                         sys::agora_rtc_conn_destroy(conn);
+                        sys::agora_media_node_factory_destroy(factory);
                         sys::agora_service_release(svc);
                     }
                     return Err(AgoraError::msg("connect", "event channel closed unexpectedly"));
@@ -206,7 +225,19 @@ impl Session {
             }
         };
 
-        Ok(Session { svc, conn, _observer: observer, _app_id: app_id, _channel: channel, _token: token, _user_id: user_id, rx, tx: tx_clone, conn_id })
+        Ok(Session {
+            svc,
+            conn,
+            _observer: observer,
+            factory,
+            _app_id: app_id,
+            _channel: channel,
+            _token: token,
+            _user_id: user_id,
+            rx,
+            tx: tx_clone,
+            conn_id,
+        })
     }
 
     /// Hand out a clonable sender so the SIGINT handler (and a `--duration`
@@ -214,6 +245,21 @@ impl Session {
     /// listens on.
     pub fn sender(&self) -> mpsc::Sender<ConnEvent> {
         self.tx.clone()
+    }
+
+    /// Create a publisher for the chosen codec mode. The returned
+    /// AudioPublisher owns the underlying SDK sender + track handles.
+    /// Wired in Task 11; per-mode publishers come from Tasks 9–10.
+    pub fn create_audio_publisher(&self, _mode: super::publisher::CodecMode)
+        -> Result<super::publisher::AudioPublisher, AgoraError>
+    {
+        unimplemented!("Task 11 wires this up via super::audio::create()")
+    }
+
+    pub fn create_video_publisher(&self, _mode: super::publisher::CodecMode)
+        -> Result<super::publisher::VideoPublisher, AgoraError>
+    {
+        unimplemented!("Task 11 wires this up via super::video::create()")
     }
 
     /// Block until a `Shutdown` event arrives (clean, exit 0) or a fatal
@@ -249,6 +295,7 @@ impl Drop for Session {
             // inspected above.
             let _ = sys::agora_rtc_conn_unregister_observer(self.conn);
             sys::agora_rtc_conn_destroy(self.conn);
+            sys::agora_media_node_factory_destroy(self.factory);
             let rc = sys::agora_service_release(self.svc);
             if rc != 0 {
                 eprintln!("warning: agora_service_release returned {rc}");
