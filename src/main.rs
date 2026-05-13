@@ -100,7 +100,7 @@ fn main() -> Result<()> {
     );
     println!();
     println!("Phase 1 will:");
-    println!("  • Load the Agora RTC SDK via the C++ FFI shim in native/");
+    println!("  • Load the Agora RTC SDK (flat C API) via extern \"C\" FFI");
     println!("  • Join `{}` as `{}`", cli.channel, cli.rtc_user_id);
     println!("  • Log \"ready\" then idle until SIGINT");
     println!();

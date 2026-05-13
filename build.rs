@@ -1,23 +1,21 @@
-//! Drive the CMake build and stitch the resulting static lib + the
-//! Agora RTSA shared lib into the Rust link.
+//! Drive the CMake SDK-staging step and wire the Agora RTSA shared lib
+//! into the Rust link.
 //!
 //! Flow:
 //!   1. Invoke CMake — it downloads + extracts the Agora RTSA SDK
 //!      (or uses the pre-staged path if AGORA_RTC_SDK_PATH env is set)
-//!      and compiles `native/src/agora_shim.cpp` into libagora_shim.a.
-//!   2. Read `agora_sdk_paths.txt` written by the CMake script to learn
-//!      where the SDK's libagora_rtc_sdk.{so,dylib} lives.
+//!      and writes `agora_sdk_paths.txt`. No C++ is compiled: the SDK
+//!      exposes a flat C API that Rust calls directly via `extern "C"`.
+//!   2. Read `agora_sdk_paths.txt` to learn where the SDK's
+//!      libagora_rtc_sdk.{so,dylib} lives.
 //!   3. Emit `cargo:rustc-link-*` directives so the final binary links
-//!      both the shim (static) and the SDK (dynamic) and finds the SDK
-//!      at runtime via rpath.
+//!      the SDK (dynamic) and finds it at runtime via rpath.
 
 use std::env;
 use std::path::PathBuf;
 
 fn main() {
     println!("cargo:rerun-if-changed=CMakeLists.txt");
-    println!("cargo:rerun-if-changed=native/src/agora_shim.cpp");
-    println!("cargo:rerun-if-changed=native/include/agora_shim.h");
     println!("cargo:rerun-if-env-changed=AGORA_RTC_SDK_PATH");
 
     // Forward env override to CMake so callers can `export
@@ -28,12 +26,7 @@ fn main() {
     }
     let dst = cfg.build();
 
-    // CMake's `install` step puts artifacts under `${dst}/lib` and the
-    // sidecar `agora_sdk_paths.txt` at `${dst}/agora_sdk_paths.txt`.
-    let lib_dir = dst.join("lib");
-    println!("cargo:rustc-link-search=native={}", lib_dir.display());
-    println!("cargo:rustc-link-lib=static=agora_shim");
-
+    // CMake installs the `agora_sdk_paths.txt` sidecar at `${dst}/agora_sdk_paths.txt`.
     let paths_file = dst.join("agora_sdk_paths.txt");
     let (sdk_lib_dir, sdk_lib_name) = read_sdk_paths(&paths_file);
     println!("cargo:rustc-link-search=native={}", sdk_lib_dir);
@@ -53,14 +46,6 @@ fn main() {
             println!("cargo:rustc-link-arg=-Wl,-rpath,{}", sdk_lib_dir);
             println!("cargo:rustc-link-arg=-Wl,-rpath,@loader_path");
         }
-        _ => {}
-    }
-
-    // C++ stdlib link (required when linking a Rust binary against a
-    // static C++ archive that didn't already pull in libstdc++).
-    match target_os.as_str() {
-        "linux" => println!("cargo:rustc-link-lib=dylib=stdc++"),
-        "macos" => println!("cargo:rustc-link-lib=dylib=c++"),
         _ => {}
     }
 }
