@@ -5,6 +5,7 @@ mod observer;
 mod session;
 mod publisher;
 mod video;
+mod audio;
 
 // AgoraError is the error type returned by Session::connect and Session::run.
 // It's re-exported for callers that want to match on it directly; the binary
