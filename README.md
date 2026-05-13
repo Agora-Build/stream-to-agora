@@ -5,11 +5,13 @@ Stream a local file (and later https/rtmp/rtsp) to an Agora RTC channel as a reg
 ## Status
 
 **Phase 2: publishes.** The CLI runs ffmpeg against any input file it can
-read, decides per-codec whether to passthrough encoded frames (H.264 / H.265
-/ VP8 / VP9 / AV1 / mjpeg video; AAC / Opus / G.711 / G.722 audio) or
-decode to raw YUV+PCM, and publishes one audio + one video track to the
-RTC channel. `--loop` for steady-state publish; `--duration` for bounded
-soak runs.
+read, then publishes one audio + one video track to the RTC channel.
+If the input is H.264 video + AAC audio, the encoded frames pass through
+unchanged (`-c copy`, zero-CPU). Any other codec ffmpeg can decode
+(H.265 / VP8 / VP9 / AV1 / Opus / MP3 / Vorbis / PCM / …) is decoded to
+raw YUV+PCM and pushed via Agora's raw-frame senders; Agora's edge
+re-encodes downstream. `--loop` for steady-state publish; `--duration`
+for bounded soak runs.
 
 | Phase | Milestone | Status |
 |---|---|---|
@@ -70,7 +72,7 @@ stream-to-agora ./demo.mp4 \
 ## Usage
 
 ```bash
-# Local file (after Phase 3)
+# Local file
 stream-to-agora ./demo.mp4 --app-id $AGORA_APP_ID --channel demo --rtc-user-id 42 --token "$TOKEN"
 
 # String account (matches atem's "s/" convention)
@@ -79,7 +81,7 @@ stream-to-agora ./demo.mp4 --app-id ... --channel demo --rtc-user-id s/alice --t
 # Loop forever for steady-state load testing
 stream-to-agora ./loop.mp4 --app-id ... --channel demo --rtc-user-id 42 --token "$TOKEN" --loop
 
-# Remote source (Phase 4)
+# Remote source (Phase 3)
 stream-to-agora rtmp://live.example.com/app/key --app-id ... --channel demo --rtc-user-id 42 --token "$TOKEN"
 ```
 

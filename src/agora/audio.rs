@@ -139,6 +139,10 @@ impl EncodedAudioPublisher {
 
 impl Drop for EncodedAudioPublisher {
     fn drop(&mut self) {
+        // TODO(phase3): same lifetime caveat as EncodedVideoPublisher::drop in
+        // video.rs — publishers moved into tokio tasks can outlive Session in
+        // pathological shutdown orderings. Benign for the single-shot CLI;
+        // fix with a CancellationToken + tokio::join when Session is reusable.
         unsafe {
             let local = sys::agora_rtc_conn_get_local_user(self.conn);
             let _ = sys::agora_local_user_unpublish_audio(local, self.track);
@@ -190,6 +194,7 @@ impl RawAudioPublisher {
 
 impl Drop for RawAudioPublisher {
     fn drop(&mut self) {
+        // TODO(phase3): same lifetime caveat as EncodedVideoPublisher::drop.
         unsafe {
             let local = sys::agora_rtc_conn_get_local_user(self.conn);
             let _ = sys::agora_local_user_unpublish_audio(local, self.track);

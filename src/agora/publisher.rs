@@ -18,14 +18,24 @@ pub enum CodecMode {
     Raw,
 }
 
-/// The video codec names ffprobe reports for codecs Agora's encoded
-/// `agora_video_encoded_image_sender_send` accepts.
-const VIDEO_ENCODED_OK: &[&str] = &["h264", "hevc", "vp8", "vp9", "av1", "mjpeg"];
+/// The video codec names ffprobe reports for codecs we can publish via
+/// `agora_video_encoded_image_sender_send` **AND** for which our current
+/// ffmpeg pipeline output format (`-f h264`, Annex-B) is correct.
+///
+/// Phase 2 ships with H.264 only on the encoded path. Other codecs Agora's
+/// encoded sender technically supports (H.265/VP8/VP9/AV1/mjpeg) need
+/// codec-specific ffmpeg muxers (-f hevc / -f ivf / -f ogg / -f mjpeg …)
+/// and matching `encoded_video_frame_info.codec_type` values; that's a
+/// Phase 3 expansion. Sending VP9 bytes wrapped in an H.264 muxer just
+/// makes ffmpeg error out and emit zero bytes — silent failure.
+const VIDEO_ENCODED_OK: &[&str] = &["h264"];
 
-/// Audio codec names for `agora_audio_encoded_frame_sender_send`. ffprobe
-/// reports `aac` for all AAC profiles; the encoded-frame info struct's
-/// `codec` field is set per-profile in `agora::audio` later.
-const AUDIO_ENCODED_OK: &[&str] = &["aac", "opus", "pcm_alaw", "pcm_mulaw", "g722"];
+/// Audio codec names for the encoded path. Same restriction as video:
+/// Phase 2's pipeline writes `-f adts`, which only accepts AAC. Everything
+/// else (Opus / PCMA / PCMU / G.722) falls through to the Raw path and
+/// gets decoded → s16le → pushed via `agora_audio_pcm_data_sender_send`,
+/// which works for every codec ffmpeg can decode.
+const AUDIO_ENCODED_OK: &[&str] = &["aac"];
 
 /// Pure mode-decision. Encoded if *both* present streams use accepted
 /// codecs; otherwise Raw. A video-only or audio-only input takes only
@@ -126,7 +136,7 @@ mod tests {
     #[test]
     fn h264_aac_picks_encoded()  { assert_eq!(decide(&info(H264_AAC)),  CodecMode::Encoded); }
     #[test]
-    fn vp9_opus_picks_encoded()  { assert_eq!(decide(&info(VP9_OPUS)),  CodecMode::Encoded); }
+    fn vp9_opus_picks_raw()      { assert_eq!(decide(&info(VP9_OPUS)),  CodecMode::Raw); }
     #[test]
     fn mpeg2_mp3_picks_raw()     { assert_eq!(decide(&info(MPEG2_MP3)), CodecMode::Raw); }
 

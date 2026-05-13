@@ -81,12 +81,11 @@ struct Cli {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    if cli.audio_only || cli.video_only {
-        anyhow::bail!("--audio-only and --video-only are not yet implemented in Phase 2 (planned for Phase 3 polish).");
-    }
-
     if cli.audio_only && cli.video_only {
         bail!("--audio-only and --video-only are mutually exclusive");
+    }
+    if cli.audio_only || cli.video_only {
+        bail!("--audio-only and --video-only are not yet implemented in Phase 2 (planned for Phase 3).");
     }
 
     let input_kind = classify_input(&cli.input);
@@ -97,8 +96,8 @@ async fn main() -> Result<()> {
         }
     } else {
         bail!(
-            "Input '{}' looks like a {:?}; only local files are supported in v0.1. \
-             Coming in a later release.", cli.input, input_kind,
+            "Input '{}' looks like a {:?}; only local files are supported in Phase 2. \
+             Remote sources are Phase 3.", cli.input, input_kind,
         );
     }
 
