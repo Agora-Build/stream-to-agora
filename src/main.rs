@@ -122,9 +122,6 @@ async fn main() -> Result<()> {
     if cli.audio_only && cli.video_only {
         bail!("--audio-only and --video-only are mutually exclusive");
     }
-    if cli.audio_only || cli.video_only {
-        bail!("--audio-only and --video-only are not yet implemented in Phase 2 (planned for Phase 3).");
-    }
 
     let input_kind = classify_input(&cli.input);
     match input_kind {
@@ -169,31 +166,49 @@ async fn main() -> Result<()> {
     let ffprobe_bin = ffmpeg_bin.parent().map(|d| d.join("ffprobe"));
     let info = ffmpeg::probe(std::path::Path::new(&cli.input), ffprobe_bin.as_deref())
         .map_err(|e| anyhow::anyhow!("probe failed: {e}"))?;
-    if info.video.is_none() {
-        anyhow::bail!("Input has no video stream; Phase 2 requires one (audio-only publish coming in Phase 3).");
+    if cli.audio_only && info.audio.is_none() {
+        anyhow::bail!("--audio-only requested but input has no audio stream");
     }
-    if info.audio.is_none() {
+    if cli.video_only && info.video.is_none() {
+        anyhow::bail!("--video-only requested but input has no video stream");
+    }
+    if !cli.audio_only && info.video.is_none() {
+        anyhow::bail!("Input has no video stream; pass --audio-only to publish audio only");
+    }
+    if !cli.video_only && info.audio.is_none() {
         eprintln!("warning: input has no audio stream — publishing video only.");
     }
     let mode = agora::decide(&info);
     eprintln!("  codec mode: {mode:?}");
 
     // ── Create publishers and apply video metadata ────────────────────
-    let mut audio_pub_opt = if info.audio.is_some() {
+    let mut audio_pub_opt = if info.audio.is_some() && !cli.video_only {
         Some(session.create_audio_publisher(mode)?)
     } else { None };
-    let mut video_pub = session.create_video_publisher(mode)?;
+    let mut video_pub_opt = if info.video.is_some() && !cli.audio_only {
+        Some(session.create_video_publisher(mode)?)
+    } else { None };
 
-    let v = info.video.as_ref().unwrap();
-    let (w, h) = (v.width.unwrap_or(0), v.height.unwrap_or(0));
-    let (fps_n, fps_d) = v.avg_frame_rate.unwrap_or((30, 1));
-    match &mut video_pub {
-        agora::VideoPublisher::Encoded(p) => p.set_metadata(w, h, fps_n, fps_d),
-        agora::VideoPublisher::Raw(p) => p.set_dimensions(w, h),
+    let (w, h, fps_n, fps_d) = match info.video.as_ref() {
+        Some(v) => (
+            v.width.unwrap_or(0),
+            v.height.unwrap_or(0),
+            v.avg_frame_rate.unwrap_or((30, 1)).0,
+            v.avg_frame_rate.unwrap_or((30, 1)).1,
+        ),
+        None => (0, 0, 30, 1),
+    };
+    if let Some(vp) = video_pub_opt.as_mut() {
+        match vp {
+            agora::VideoPublisher::Encoded(p) => p.set_metadata(w, h, fps_n, fps_d),
+            agora::VideoPublisher::Raw(p) => p.set_dimensions(w, h),
+        }
     }
 
     // ── Publish ───────────────────────────────────────────────────────
-    video_pub.publish()?;
+    if let Some(vp) = video_pub_opt.as_ref() {
+        vp.publish()?;
+    }
     if let Some(ap) = audio_pub_opt.as_ref() { ap.publish()?; }
 
     // ── Spawn ffmpeg + frame pumps ────────────────────────────────────
@@ -211,8 +226,14 @@ async fn main() -> Result<()> {
         reconnect_attempts: cli.reconnect_attempts,
         loop_forever: cli.r#loop,
     };
+    let pipeline_info = {
+        let mut p = info.clone();
+        if cli.video_only { p.audio = None; }
+        if cli.audio_only { p.video = None; }
+        p
+    };
     let mut pipeline = ffmpeg::Pipeline::spawn(
-        std::path::Path::new(&cli.input), &ffmpeg_bin, &info, mode,
+        std::path::Path::new(&cli.input), &ffmpeg_bin, &pipeline_info, mode,
         kind_lite, &pipe_opts,
     )?;
 
@@ -224,40 +245,33 @@ async fn main() -> Result<()> {
     let audio_tx = session.sender();
     let audio_channels = info.audio.as_ref().and_then(|a| a.channels).unwrap_or(2).max(1);
 
-    match (mode, video_pub, audio_pub_opt) {
-        (agora::CodecMode::Encoded, agora::VideoPublisher::Encoded(vp), Some(agora::AudioPublisher::Encoded(ap))) => {
-            if let Some(vs) = video_stream {
-                let jh = tokio::spawn(pump_h264(vp, vs, cancel.clone(), session_start, fps_n, fps_d, cli.reconnect_attempts, video_tx.clone()));
-                session.register_pump(jh).await;
-            }
-            if let Some(as_) = audio_stream {
-                let jh = tokio::spawn(pump_aac(ap, as_, cancel.clone(), cli.reconnect_attempts, audio_tx.clone()));
-                session.register_pump(jh).await;
-            }
-        }
-        (agora::CodecMode::Raw, agora::VideoPublisher::Raw(vp), Some(agora::AudioPublisher::Raw(ap))) => {
-            if let Some(vs) = video_stream {
-                let jh = tokio::spawn(pump_yuv(vp, vs, cancel.clone(), session_start, fps_n, fps_d, w, h, cli.reconnect_attempts, video_tx.clone()));
-                session.register_pump(jh).await;
-            }
-            if let Some(as_) = audio_stream {
-                let jh = tokio::spawn(pump_pcm(ap, as_, cancel.clone(), audio_channels, cli.reconnect_attempts, audio_tx.clone()));
-                session.register_pump(jh).await;
+    if let Some(vp) = video_pub_opt.take() {
+        if let Some(vs) = video_stream {
+            match vp {
+                agora::VideoPublisher::Encoded(vp) => {
+                    let jh = tokio::spawn(pump_h264(vp, vs, cancel.clone(), session_start, fps_n, fps_d, cli.reconnect_attempts, video_tx.clone()));
+                    session.register_pump(jh).await;
+                }
+                agora::VideoPublisher::Raw(vp) => {
+                    let jh = tokio::spawn(pump_yuv(vp, vs, cancel.clone(), session_start, fps_n, fps_d, w, h, cli.reconnect_attempts, video_tx.clone()));
+                    session.register_pump(jh).await;
+                }
             }
         }
-        (agora::CodecMode::Encoded, agora::VideoPublisher::Encoded(vp), None) => {
-            if let Some(vs) = video_stream {
-                let jh = tokio::spawn(pump_h264(vp, vs, cancel.clone(), session_start, fps_n, fps_d, cli.reconnect_attempts, video_tx.clone()));
-                session.register_pump(jh).await;
+    }
+    if let Some(ap) = audio_pub_opt.take() {
+        if let Some(as_) = audio_stream {
+            match ap {
+                agora::AudioPublisher::Encoded(ap) => {
+                    let jh = tokio::spawn(pump_aac(ap, as_, cancel.clone(), cli.reconnect_attempts, audio_tx.clone()));
+                    session.register_pump(jh).await;
+                }
+                agora::AudioPublisher::Raw(ap) => {
+                    let jh = tokio::spawn(pump_pcm(ap, as_, cancel.clone(), audio_channels, cli.reconnect_attempts, audio_tx.clone()));
+                    session.register_pump(jh).await;
+                }
             }
         }
-        (agora::CodecMode::Raw, agora::VideoPublisher::Raw(vp), None) => {
-            if let Some(vs) = video_stream {
-                let jh = tokio::spawn(pump_yuv(vp, vs, cancel.clone(), session_start, fps_n, fps_d, w, h, cli.reconnect_attempts, video_tx.clone()));
-                session.register_pump(jh).await;
-            }
-        }
-        _ => unreachable!("publisher variant must match codec mode"),
     }
 
     // Feed Shutdown into the session's channel on SIGINT or after --duration.
