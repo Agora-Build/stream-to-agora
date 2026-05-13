@@ -75,9 +75,44 @@ pub fn input_args(kind: InputKindLite, opts: &PipelineOpts) -> Vec<String> {
     a
 }
 
+/// One ffmpeg subprocess for one direction (video or audio). Owns the
+/// Child plus enough state to rebuild it on demand (for RTMP/RTSP
+/// reconnect in P3-T6's pump tasks).
+pub struct PipelineStream {
+    pub child: Child,
+    ffmpeg_bin: std::path::PathBuf,
+    input: std::path::PathBuf,
+    kind: InputKindLite,
+    opts: PipelineOpts,
+    /// Output args (the ones AFTER `-i <url>`) — codec-mode-specific.
+    output_args: Vec<String>,
+}
+
+impl PipelineStream {
+    pub fn stdout(&mut self) -> Option<&mut ChildStdout> {
+        self.child.stdout.as_mut()
+    }
+
+    pub fn kind(&self) -> InputKindLite { self.kind }
+
+    /// Kill the current child (SIGKILL via kill_on_drop semantics; we
+    /// also call `start_kill` to ask the runtime to send the signal
+    /// immediately) and spawn a fresh ffmpeg with the same input + opts
+    /// + output args. Replaces `self.child`. Returns when the new child
+    /// has been spawned (the new stdout pipe is ready for reads).
+    pub async fn respawn(&mut self) -> anyhow::Result<()> {
+        let _ = self.child.start_kill();
+        let new_child = spawn_one(
+            &self.ffmpeg_bin, &self.input, self.kind, &self.opts, &self.output_args,
+        )?;
+        self.child = new_child;
+        Ok(())
+    }
+}
+
 pub struct Pipeline {
-    pub video: Option<Child>,
-    pub audio: Option<Child>,
+    pub video: Option<PipelineStream>,
+    pub audio: Option<PipelineStream>,
 }
 
 impl Pipeline {
@@ -96,21 +131,35 @@ impl Pipeline {
         kind: InputKindLite,
         opts: &PipelineOpts,
     ) -> Result<Self> {
-        let video = info.video.as_ref().map(|_v| {
-            spawn_one(ffmpeg_bin, input, kind, opts, &video_args(mode))
+        let video = info.video.as_ref().map(|_v| -> Result<PipelineStream> {
+            let output_args = video_args(mode);
+            let child = spawn_one(ffmpeg_bin, input, kind, opts, &output_args)?;
+            Ok(PipelineStream {
+                child,
+                ffmpeg_bin: ffmpeg_bin.to_path_buf(),
+                input: input.to_path_buf(),
+                kind, opts: opts.clone(), output_args,
+            })
         }).transpose()?;
-        let audio = info.audio.as_ref().map(|a| {
+        let audio = info.audio.as_ref().map(|a| -> Result<PipelineStream> {
             let ac = a.channels.unwrap_or(2).max(1);
-            spawn_one(ffmpeg_bin, input, kind, opts, &audio_args(mode, ac))
+            let output_args = audio_args(mode, ac);
+            let child = spawn_one(ffmpeg_bin, input, kind, opts, &output_args)?;
+            Ok(PipelineStream {
+                child,
+                ffmpeg_bin: ffmpeg_bin.to_path_buf(),
+                input: input.to_path_buf(),
+                kind, opts: opts.clone(), output_args,
+            })
         }).transpose()?;
         Ok(Pipeline { video, audio })
     }
 
     pub fn video_stdout(&mut self) -> Option<&mut ChildStdout> {
-        self.video.as_mut().and_then(|c| c.stdout.as_mut())
+        self.video.as_mut().and_then(|s| s.stdout())
     }
     pub fn audio_stdout(&mut self) -> Option<&mut ChildStdout> {
-        self.audio.as_mut().and_then(|c| c.stdout.as_mut())
+        self.audio.as_mut().and_then(|s| s.stdout())
     }
 }
 

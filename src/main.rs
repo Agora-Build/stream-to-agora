@@ -223,8 +223,8 @@ async fn main() -> Result<()> {
     let audio_tx = session.sender();
 
     // Destructure publishers out so we can move concrete types into the pump tasks.
-    let video_stdout = pipeline.video.take().and_then(|mut c| c.stdout.take());
-    let audio_stdout = pipeline.audio.take().and_then(|mut c| c.stdout.take());
+    let video_stdout = pipeline.video.take().and_then(|mut s| s.child.stdout.take());
+    let audio_stdout = pipeline.audio.take().and_then(|mut s| s.child.stdout.take());
 
     match video_pub {
         agora::VideoPublisher::Encoded(vp) => {
