@@ -198,8 +198,23 @@ async fn main() -> Result<()> {
     if let Some(ap) = audio_pub_opt.as_ref() { ap.publish()?; }
 
     // ── Spawn ffmpeg + frame pumps ────────────────────────────────────
+    let kind_lite = match classify_input(&cli.input) {
+        InputKind::LocalFile => ffmpeg::pipeline::InputKindLite::LocalFile,
+        InputKind::Https => ffmpeg::pipeline::InputKindLite::Http,
+        InputKind::Rtmp => ffmpeg::pipeline::InputKindLite::Rtmp,
+        InputKind::Rtsp => ffmpeg::pipeline::InputKindLite::Rtsp,
+        InputKind::Unknown => unreachable!("already rejected in startup gate"),
+    };
+    let pipe_opts = ffmpeg::pipeline::PipelineOpts {
+        http_headers: cli.http_header.clone(),
+        user_agent: cli.user_agent.clone(),
+        rtsp_transport: cli.rtsp_transport.clone(),
+        reconnect_attempts: cli.reconnect_attempts,
+        loop_forever: cli.r#loop,
+    };
     let mut pipeline = ffmpeg::Pipeline::spawn(
-        std::path::Path::new(&cli.input), &ffmpeg_bin, &info, mode, cli.r#loop,
+        std::path::Path::new(&cli.input), &ffmpeg_bin, &info, mode,
+        kind_lite, &pipe_opts,
     )?;
 
     let session_start = std::time::Instant::now();
