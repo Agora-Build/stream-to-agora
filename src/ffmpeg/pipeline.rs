@@ -313,12 +313,16 @@ mod tests {
     #[tokio::test]
     async fn raw_mode_video_pipe_emits_yuv_bytes() {
         let info = crate::ffmpeg::probe(&fixture(), None).unwrap();
+        let (w, h) = {
+            let v = info.video.as_ref().expect("fixture has video stream");
+            (v.width.expect("width"), v.height.expect("height"))
+        };
         let opts = PipelineOpts::default();
         let mut pipe = Pipeline::spawn(
             &fixture(), &ffmpeg(), &info, CodecMode::Raw,
             InputKindLite::LocalFile, &opts,
         ).unwrap();
-        let need = crate::parse::yuv::frame_bytes(320, 180);
+        let need = crate::parse::yuv::frame_bytes(w, h);
         let mut filled = 0;
         let mut buf = vec![0u8; need];
         while filled < need {
@@ -326,6 +330,6 @@ mod tests {
             if n == 0 { break; }
             filled += n;
         }
-        assert_eq!(filled, need, "expected one full yuv420p 320x180 frame");
+        assert_eq!(filled, need, "expected one full yuv420p {w}x{h} frame");
     }
 }

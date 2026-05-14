@@ -55,6 +55,17 @@ jobs:
         shell: bash
         run: cmake --version
 
+      - name: Install ffmpeg + ffprobe (needed by the integration tests)
+        shell: bash
+        run: |
+          if [[ "$RUNNER_OS" == "Linux" ]]; then
+            sudo apt-get update -qq && sudo apt-get install -y ffmpeg
+          elif [[ "$RUNNER_OS" == "macOS" ]]; then
+            brew install ffmpeg
+          fi
+          ffmpeg -version | head -1
+          ffprobe -version | head -1
+
       - name: Set version from tag
         shell: bash
         run: |
