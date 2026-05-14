@@ -1,6 +1,6 @@
 [package]
 name = "stream-to-agora"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 description = "Stream local files (and later https/rtmp/rtsp) to an Agora RTC channel"
 license = "MIT"
@@ -20,3 +20,4 @@ serde = { version = "1.0.228", features = ["derive"] }
 [build-dependencies]
 bindgen = "0.72.1"
 cmake = "0.1"
+cc = "1.0"

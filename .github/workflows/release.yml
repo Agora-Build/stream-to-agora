@@ -45,6 +45,24 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Need full history so `git merge-base --is-ancestor` can check
+          # whether this tag's commit is reachable from main.
+          fetch-depth: 0
+
+      - name: Verify tag is on main
+        shell: bash
+        run: |
+          set -euo pipefail
+          DEFAULT_BRANCH="main"
+          git fetch --quiet origin "${DEFAULT_BRANCH}:refs/remotes/origin/${DEFAULT_BRANCH}"
+          if git merge-base --is-ancestor "$GITHUB_SHA" "refs/remotes/origin/${DEFAULT_BRANCH}"; then
+            echo "Tag ${{ github.ref_name }} (commit $GITHUB_SHA) is on ${DEFAULT_BRANCH} — proceeding with release."
+          else
+            echo "::error::Tag ${{ github.ref_name }} (commit $GITHUB_SHA) is not reachable from ${DEFAULT_BRANCH}."
+            echo "::error::Releases only ship from ${DEFAULT_BRANCH}. Merge the PR first, then tag the merge commit."
+            exit 1
+          fi
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -54,6 +72,17 @@ jobs:
       - name: Install CMake (already on runners but ensure presence)
         shell: bash
         run: cmake --version
+
+      - name: Install ffmpeg + ffprobe (needed by the integration tests)
+        shell: bash
+        run: |
+          if [[ "$RUNNER_OS" == "Linux" ]]; then
+            sudo apt-get update -qq && sudo apt-get install -y ffmpeg
+          elif [[ "$RUNNER_OS" == "macOS" ]]; then
+            brew install ffmpeg
+          fi
+          ffmpeg -version | head -1
+          ffprobe -version | head -1
 
       - name: Set version from tag
         shell: bash

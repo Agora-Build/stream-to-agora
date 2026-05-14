@@ -1,24 +1,18 @@
 # stream-to-agora
 
-Stream a local file (and later https/rtmp/rtsp) to an Agora RTC channel as a regular publisher. Ffmpeg decodes the source; raw YUV (video) and PCM (audio) frames are pushed to Agora via the RTC SDK's external-source APIs.
+Stream a local file or `http(s)://` / `rtmp://` / `rtsp://` URL to an Agora RTC channel as a regular publisher. ffmpeg decodes/demuxes the source; H.264/AAC pass through as-is, anything else gets decoded to raw YUV/PCM and pushed via the SDK's external-source APIs.
 
-## Status
+## Features
 
-**Phase 2: publishes.** The CLI runs ffmpeg against any input file it can
-read, then publishes one audio + one video track to the RTC channel.
-If the input is H.264 video + AAC audio, the encoded frames pass through
-unchanged (`-c copy`, zero-CPU). Any other codec ffmpeg can decode
-(H.265 / VP8 / VP9 / AV1 / Opus / MP3 / Vorbis / PCM / …) is decoded to
-raw YUV+PCM and pushed via Agora's raw-frame senders; Agora's edge
-re-encodes downstream. `--loop` for steady-state publish; `--duration`
-for bounded soak runs.
-
-| Phase | Milestone | Status |
-|---|---|---|
-| 0 | CLI surface, arg validation | ✅ |
-| 1 | Agora SDK loads, joins channel, logs "ready", idles | ✅ |
-| 2 | Publish a local file via ffmpeg (any codec ffmpeg reads) | ✅ |
-| 3 | Remote sources: `https://`, `rtmp://`, `rtsp://` | ⏳ next |
+- **Local files** — any container/codec ffmpeg can read (`./demo.mp4`, `./loop.mkv`, …).
+- **Remote sources** — `http://`, `https://`, `rtmp://`, `rtsp://`.
+- **Encoded passthrough** — H.264 + AAC inputs are demuxed with `-c copy` (zero CPU on our side); the SDK gets the bitstream as-is.
+- **Raw fallback** — anything else (VP9, Opus, MP3, MPEG-2, …) is decoded by ffmpeg to yuv420p + s16le PCM and pushed via the raw senders.
+- **Selective publish** — `--audio-only` / `--video-only` for source previews, audio-only push-to-talk, etc.
+- **Hybrid reconnect** — `http(s)` uses ffmpeg's built-in `-reconnect` flags; RTMP/RTSP respawn the ffmpeg subprocess, bounded by `--reconnect-attempts`.
+- **Token renewal** — `--token-renew-cmd <shell-cmd>` runs your token-minter on `TokenWillExpire` and rotates the token without dropping the channel.
+- **`--loop` forever** — steady-state load testing from a single short file.
+- **ffmpeg passthrough flags** — `--http-header K:V` (repeatable), `--user-agent`, `--rtsp-transport tcp|udp|http`.
 
 ## Platforms
 
@@ -83,6 +77,34 @@ stream-to-agora ./loop.mp4 --app-id ... --channel demo --rtc-user-id 42 --token 
 
 # Remote source (Phase 3)
 stream-to-agora rtmp://live.example.com/app/key --app-id ... --channel demo --rtc-user-id 42 --token "$TOKEN"
+
+# Remote HTTPS source
+stream-to-agora https://example.com/stream.mp4 \
+  --app-id $AGORA_APP_ID --channel demo --rtc-user-id 42 --token "$TOKEN"
+
+# RTMP ingest with reconnect (default --reconnect-attempts 5)
+stream-to-agora rtmp://origin.example.com/live/demo \
+  --app-id ... --channel demo --rtc-user-id 42 --token "$TOKEN"
+
+# RTSP camera through a UDP-blocking NAT
+stream-to-agora rtsp://camera.local/stream1 --rtsp-transport tcp \
+  --app-id ... --channel demo --rtc-user-id 42 --token "$TOKEN"
+
+# Audio-only publish from a video file
+stream-to-agora ./talk.mp4 --audio-only \
+  --app-id ... --channel demo --rtc-user-id 42 --token "$TOKEN"
+
+# Auth'd HLS source with a Bearer token and custom UA
+stream-to-agora https://secured.example/master.m3u8 \
+  --http-header 'Authorization: Bearer abc123' \
+  --user-agent 'stream-to-agora/0.3' \
+  --app-id ... --channel demo --rtc-user-id 42 --token "$TOKEN"
+
+# Long stream with auto-renew (90s tokens for fast iteration during dev)
+TOKEN=$(atem token rtc create --channel demo --rtc-user-id 42 --expire 90 | awk '/^RTC Token/{getline; print; exit}')
+stream-to-agora ./show.mp4 --loop --duration 600 \
+  --token-renew-cmd 'atem token rtc create --channel {channel} --rtc-user-id {rtc_user_id} --expire 90 | awk "/^RTC Token created/{getline; print; exit}"' \
+  --app-id ... --channel demo --rtc-user-id 42 --token "$TOKEN"
 ```
 
 ## Configuration consistency with atem
@@ -96,6 +118,23 @@ Same env-var name and flag conventions so a shell that has atem set up also has 
 | RTC user | `--rtc-user-id` (with `s/` prefix to force string account) | atem, stream-to-agora |
 
 stream-to-agora does NOT read atem's encrypted credentials store or active project — it's intentionally standalone so it can be dropped on a fresh machine without atem installed.
+
+### Token renewal
+
+`--token-renew-cmd <shell command>` runs the given command via `sh -c …`
+whenever the SDK signals that the active token is ~30 s from expiry.
+The entire trimmed stdout of the command becomes the new token; the
+command's stderr is logged on failure.
+
+Placeholders supported inside the command string:
+- `{channel}` — the channel name passed via `--channel`
+- `{rtc_user_id}` — the user id passed via `--rtc-user-id`
+
+The command should print exactly one token to stdout. For `atem`:
+
+```bash
+--token-renew-cmd 'atem token rtc create --channel {channel} --rtc-user-id {rtc_user_id} | awk "/^RTC Token created/{getline; print; exit}"'
+```
 
 ## Architecture
 
@@ -117,12 +156,28 @@ Mode is chosen at startup by `ffprobe`'ing the input: if both streams use
 codecs Agora's encoded senders accept, ffmpeg is launched with `-c copy`
 (zero-CPU demux); otherwise ffmpeg decodes and we push raw.
 
-The Agora NG SDK ships a flat C API (`agora_service_create`, `agora_rtc_conn_connect`, `agora_video_frame_sender_send`, …), so Rust links it directly via `extern "C"` — no C++ shim.
+The Agora NG SDK ships a flat C API (`agora_service_create`, `agora_rtc_conn_connect`, `agora_video_frame_sender_send`, …), which Rust links directly via `extern "C"` for everything except the encoded senders — see §Known Issues. The encoded path routes through a small C++ shim in `cpp/agora_shim.cpp`.
 
 - `src/main.rs` — CLI, ffmpeg subprocess management, frame pacing
-- `src/agora.rs` — safe Rust wrappers over the SDK's C API *(Phase 1)*
+- `src/agora/` — safe Rust wrappers (`session.rs`, `video.rs`, `audio.rs`, …)
+- `src/agora/shim.rs` — FFI declarations for the C++ encoded-sender shim
+- `cpp/agora_shim.{h,cpp}` — C++ shim calling `IVideoEncodedImageSender::sendEncodedVideoImage` / `IAudioEncodedFrameSender::sendEncodedAudioFrame` directly
 - `CMakeLists.txt` — downloads + stages the Agora SDK at build time, emits include/lib paths
-- `build.rs` — runs CMake, links `libagora_rtc_sdk`, sets rpath
+- `build.rs` — runs CMake, compiles the C++ shim via `cc`, links `libagora_rtc_sdk` + the shim, sets rpath
+
+## Known Issues
+
+### SDK flat-C encoded senders are broken (worked around via C++ shim)
+
+`agora_video_encoded_image_sender_send` and `agora_audio_encoded_frame_sender_send` in the SDK's flat C API accept exactly one frame and then return `false` for every subsequent call. The bug is in the C wrappers — the C++ methods (`IVideoEncodedImageSender::sendEncodedVideoImage`, `IAudioEncodedFrameSender::sendEncodedAudioFrame`) work correctly.
+
+Verified by running the SDK's own `sample_send_h264_pcm` with return-value logging (the upstream sample discards the return value, hiding the bug): 90/90 frames accepted via C++. A minimal Rust harness calling the flat C functions with the exact same setup gets 1/N accepted.
+
+**Workaround in this repo:** `cpp/agora_shim.cpp` exposes a narrow `extern "C"` ABI that constructs the encoded sender + custom track via the C++ API and forwards `send` calls through the C++ vtable. Rust calls into this shim instead of the broken flat-C functions. The raw senders (`agora_video_frame_sender_send`, `agora_audio_pcm_data_sender_send`) work fine through the flat C API and are unchanged.
+
+The shim takes the existing flat-C service/connection/factory handles (which Rust holds via `bindgen`) and recovers the underlying C++ object pointers by dereferencing them — the flat-C wrappers store the C++ object pointer in the first 8 bytes of the handle struct (verified via disassembly of the SDK's own C wrappers).
+
+If/when Agora fixes the C ABI, the shim can be deleted and the encoded publishers in `src/agora/{video,audio}.rs` can switch back to the flat-C `agora_*_sender_send` calls.
 
 ## Development
 
@@ -137,6 +192,24 @@ Use a pre-staged SDK instead of the auto-download:
 
 ```bash
 AGORA_RTC_SDK_PATH=/path/to/agora_rtc_sdk cargo build
+```
+
+### End-to-end tests
+
+`scripts/test-e2e.sh` runs a matrix of live publish scenarios against
+real Agora (local file + HTTPS MP4 + HLS + selective publish + CLI
+validation). It requires `atem` on PATH with a project selected, plus
+network reachability to media.w3.org, stream.mux.com, and Apple's CDN.
+
+```bash
+cargo build --release
+scripts/test-e2e.sh        # ~3 min wall-clock, 16 tests
+```
+
+Override the binary path or per-test duration via env:
+
+```bash
+STREAM_TO_AGORA=/path/to/stream-to-agora DURATION=4 scripts/test-e2e.sh
 ```
 
 ## License
