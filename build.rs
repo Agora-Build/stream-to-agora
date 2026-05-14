@@ -65,6 +65,25 @@ fn main() {
         _ => {}
     }
 
+    // --- Compile the C++ encoded-sender shim (cpp/agora_shim.cpp) ---
+    //
+    // The SDK's flat C API has a bug in `agora_video_encoded_image_sender_send`
+    // and `agora_audio_encoded_frame_sender_send`: the SDK accepts the first
+    // call, then rejects all subsequent calls (rc=1). The C++ method
+    // `IVideoEncodedImageSender::sendEncodedVideoImage` works correctly.
+    // The shim links against the SDK's C++ headers and dispatches through
+    // the C++ vtable, exposing an `extern "C"` ABI back to Rust.
+    println!("cargo:rerun-if-changed=cpp/agora_shim.cpp");
+    println!("cargo:rerun-if-changed=cpp/agora_shim.h");
+    cc::Build::new()
+        .cpp(true)
+        .std("c++14")
+        .file("cpp/agora_shim.cpp")
+        .include(&sdk_include_dir)
+        .flag_if_supported("-Wno-unused-parameter")
+        .compile("agora_shim");
+    println!("cargo:rustc-link-lib=static=agora_shim");
+
     // --- Generate Rust bindings for the flat C API via bindgen ---
     println!("cargo:rerun-if-changed=wrapper.h");
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());

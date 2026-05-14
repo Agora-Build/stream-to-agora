@@ -10,6 +10,7 @@
 use std::ffi::CString;
 use std::os::raw::c_void;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio::sync::Notify;
@@ -23,6 +24,51 @@ use super::sys;
 // (they live in the C++ headers, not the C ones, so we spell them out).
 const CHANNEL_PROFILE_LIVE_BROADCASTING: i32 = 1;
 const CLIENT_ROLE_BROADCASTER: i32 = 1;
+
+/// Latching cancellation primitive shared between `Session::run` and the
+/// pump tasks. A bare `Notify` doesn't work for this: `notify_waiters()`
+/// only wakes waiters currently registered at the moment of the call. If
+/// the pump is mid-iteration (draining a buffered HLS segment with
+/// `sleep_until` between frames), it's not registered as a waiter; the
+/// notify is lost and a subsequent `cancel.notified().await` blocks
+/// forever. The AtomicBool latches the cancel signal so any later check
+/// returns immediately.
+pub struct CancelToken {
+    flag: AtomicBool,
+    notify: Notify,
+}
+
+impl CancelToken {
+    pub fn new() -> Arc<Self> {
+        Arc::new(CancelToken { flag: AtomicBool::new(false), notify: Notify::new() })
+    }
+    /// Fire the cancel signal — sets the flag, then wakes any registered waiters.
+    pub fn cancel(&self) {
+        self.flag.store(true, Ordering::Release);
+        self.notify.notify_waiters();
+    }
+    pub fn is_cancelled(&self) -> bool {
+        self.flag.load(Ordering::Acquire)
+    }
+    /// Await cancellation. Returns immediately if already fired.
+    pub async fn cancelled(&self) {
+        if self.is_cancelled() { return; }
+        // Register the waiter BEFORE re-checking the flag — Notify
+        // semantics: `notified()` returns a future that only registers
+        // for wake-up after its first poll. Polling once via `.await`
+        // ensures registration, but we must re-check the flag after
+        // registration to close the race where `cancel()` runs between
+        // our `is_cancelled` check and `notified().await`.
+        let notified = self.notify.notified();
+        tokio::pin!(notified);
+        // Register as waiter (first poll completes registration, doesn't resolve).
+        // We use `.as_mut().enable()` to register without awaiting.
+        // tokio 1.x: `Notified::enable` was added in 1.13.
+        notified.as_mut().enable();
+        if self.is_cancelled() { return; }
+        notified.await;
+    }
+}
 
 /// Send + Sync cap holding only the connection handle. Used by the
 /// token-renew task, which lives on its own Tokio worker. The SDK's
@@ -91,10 +137,12 @@ pub struct Session {
     tx: UnboundedSender<ConnEvent>,
     /// Connection id reported by `on_connected`.
     pub conn_id: u32,
-    /// Pump tasks select! on this Notify; `Session::run` fires it
-    /// before joining handles, so publishers (moved into pump tasks)
-    /// Drop while `conn` is still alive.
-    cancel: Arc<Notify>,
+    /// Latched cancellation token shared with pump tasks. `Session::run`
+    /// fires it before joining handles, so publishers (moved into pump
+    /// tasks) Drop while `conn` is still alive. Latched (vs raw Notify)
+    /// so the signal survives the pump being mid-iteration when cancel
+    /// fires — see CancelToken docs above.
+    cancel: Arc<CancelToken>,
     /// JoinHandles for tokio::spawn'd pump tasks. `Session::run`
     /// takes these and awaits them after notifying cancel.
     pump_handles: tokio::sync::Mutex<Vec<JoinHandle<()>>>,
@@ -271,7 +319,7 @@ impl Session {
             rx,
             tx: tx_clone,
             conn_id,
-            cancel: Arc::new(Notify::new()),
+            cancel: CancelToken::new(),
             pump_handles: tokio::sync::Mutex::new(Vec::new()),
         })
     }
@@ -318,7 +366,10 @@ impl Session {
         };
 
         // Notify pumps + renew task to exit; await their JoinHandles.
-        self.cancel.notify_waiters();
+        // CancelToken (vs raw Notify) latches the signal so pumps that
+        // were mid-iteration when cancel fired still see it on their
+        // next select! check.
+        self.cancel.cancel();
         let mut handles = self.pump_handles.lock().await;
         for h in handles.drain(..) {
             let _ = h.await;
@@ -328,7 +379,7 @@ impl Session {
     }
 
     /// Clone the cancellation Notify so pump / renew tasks can `select!` on it.
-    pub fn cancel_signal(&self) -> Arc<Notify> {
+    pub fn cancel_signal(&self) -> Arc<CancelToken> {
         self.cancel.clone()
     }
 

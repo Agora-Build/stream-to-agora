@@ -1,9 +1,16 @@
 //! Encoded + raw local video publishers. Each owns the SDK sender +
 //! track handles; Drop unpublishes + destroys both.
+//!
+//! The encoded path routes through the C++ shim (`cpp/agora_shim.cpp`)
+//! because the SDK's flat-C `agora_video_encoded_image_sender_send` is
+//! broken — see README §Known Issues. The raw path still uses the flat
+//! C API directly.
 
 use std::os::raw::c_void;
+use std::ptr;
 
 use super::error::{check, AgoraError};
+use super::shim;
 use super::sys;
 
 // VIDEO_CODEC_TYPE / VIDEO_BUFFER_TYPE / VIDEO_PIXEL_FORMAT / VIDEO_FRAME_TYPE
@@ -11,13 +18,12 @@ use super::sys;
 const VIDEO_CODEC_H264: i32 = 2;
 const VIDEO_BUFFER_RAW_DATA: i32 = 1;
 const VIDEO_PIXEL_I420: i32 = 1;
-const VIDEO_FRAME_TYPE_KEY: i32 = 3;
-#[allow(dead_code)]
-const VIDEO_FRAME_TYPE_DELTA: i32 = 4;
 
 pub struct EncodedVideoPublisher {
-    sender: *mut c_void,
-    track: *mut c_void,
+    /// Opaque pointer returned by `cppshim_video_encoded_create`. Owns
+    /// the C++ refptr<IVideoEncodedImageSender> + refptr<ILocalVideoTrack>.
+    shim: *mut shim::cppshim_video_pub,
+    /// Flat-C connection handle (used for publish/unpublish via the shim).
     conn: *mut c_void,
     width: i32,
     height: i32,
@@ -25,9 +31,9 @@ pub struct EncodedVideoPublisher {
     fps_den: u32,
 }
 
-// SAFETY: the SDK handles are opaque C pointers that are not thread-local;
-// we never alias them across threads without external synchronisation, and
-// the callers in Task 11 keep the publishers in a single-threaded context.
+// SAFETY: the shim pointer is opaque and we never alias it across threads
+// without external synchronisation; the pump task owns the publisher
+// exclusively.
 unsafe impl Send for EncodedVideoPublisher {}
 
 pub struct RawVideoPublisher {
@@ -45,34 +51,12 @@ pub(super) fn create_encoded(
     conn: *mut c_void,
     factory: *mut c_void,
 ) -> Result<EncodedVideoPublisher, AgoraError> {
-    let sender = unsafe {
-        sys::agora_media_node_factory_create_video_encoded_image_sender(factory)
-    };
-    if sender.is_null() {
-        return Err(AgoraError::null(
-            "agora_media_node_factory_create_video_encoded_image_sender",
-        ));
-    }
-    let mut opts: sys::sender_options = unsafe { std::mem::zeroed() };
-    opts.codec_type = VIDEO_CODEC_H264;
-    opts.cc_mode = 0; // default CC mode
-    let track = unsafe {
-        sys::agora_service_create_custom_video_track_encoded(svc, sender, &mut opts as *mut _)
-    };
-    if track.is_null() {
-        unsafe {
-            sys::agora_video_encoded_image_sender_destroy(sender);
-        }
-        return Err(AgoraError::null(
-            "agora_service_create_custom_video_track_encoded",
-        ));
-    }
-    unsafe {
-        sys::agora_local_video_track_set_enabled(track, 1);
+    let p = unsafe { shim::cppshim_video_encoded_create(svc, factory, VIDEO_CODEC_H264) };
+    if p.is_null() {
+        return Err(AgoraError::null("cppshim_video_encoded_create"));
     }
     Ok(EncodedVideoPublisher {
-        sender,
-        track,
+        shim: p,
         conn,
         width: 0,
         height: 0,
@@ -126,57 +110,47 @@ impl EncodedVideoPublisher {
         self.fps_den = fps_den.max(1);
     }
 
-    /// Push one Annex-B-framed H.264 access-unit. `capture_time_ms` is a
-    /// monotonic millisecond timestamp the SDK uses for ordering.
+    /// Push one Annex-B-framed H.264 access-unit. `_capture_time_ms` is
+    /// accepted for symmetry with the raw path but not forwarded — the
+    /// C++ shim derives timing from `frames_per_second`.
     pub fn push_h264(
         &self,
         au: &[u8],
         is_keyframe: bool,
-        capture_time_ms: i64,
+        _capture_time_ms: i64,
     ) -> Result<(), AgoraError> {
-        let mut info: sys::encoded_video_frame_info = unsafe { std::mem::zeroed() };
-        info.codec_type = VIDEO_CODEC_H264;
-        info.width = self.width;
-        info.height = self.height;
-        info.frames_per_second = (self.fps_num as i32) / (self.fps_den as i32).max(1);
-        info.frame_type = if is_keyframe {
-            VIDEO_FRAME_TYPE_KEY
-        } else {
-            VIDEO_FRAME_TYPE_DELTA
-        };
-        info.rotation = 0;
-        info.capture_time_ms = capture_time_ms;
+        let fps = (self.fps_num as i32) / (self.fps_den as i32).max(1);
         let rc = unsafe {
-            sys::agora_video_encoded_image_sender_send(
-                self.sender,
-                au.as_ptr() as *const _,
+            shim::cppshim_video_encoded_send(
+                self.shim,
+                au.as_ptr(),
                 au.len() as u32,
-                &info,
+                if is_keyframe { 1 } else { 0 },
+                fps.max(1),
             )
         };
-        check(rc, "agora_video_encoded_image_sender_send")
+        check(rc, "cppshim_video_encoded_send")
     }
 
     pub fn publish(&self) -> Result<(), AgoraError> {
-        let local = unsafe { sys::agora_rtc_conn_get_local_user(self.conn) };
-        let rc = unsafe { sys::agora_local_user_publish_video(local, self.track) };
-        check(rc, "agora_local_user_publish_video")
+        let rc = unsafe { shim::cppshim_video_encoded_publish(self.shim, self.conn) };
+        check(rc, "cppshim_video_encoded_publish")
     }
 
     pub fn unpublish(&self) -> Result<(), AgoraError> {
-        let local = unsafe { sys::agora_rtc_conn_get_local_user(self.conn) };
-        let rc = unsafe { sys::agora_local_user_unpublish_video(local, self.track) };
-        check(rc, "agora_local_user_unpublish_video")
+        let rc = unsafe { shim::cppshim_video_encoded_unpublish(self.shim, self.conn) };
+        check(rc, "cppshim_video_encoded_unpublish")
     }
 }
 
 impl Drop for EncodedVideoPublisher {
     fn drop(&mut self) {
-        unsafe {
-            let local = sys::agora_rtc_conn_get_local_user(self.conn);
-            let _ = sys::agora_local_user_unpublish_video(local, self.track);
-            sys::agora_local_video_track_destroy(self.track);
-            sys::agora_video_encoded_image_sender_destroy(self.sender);
+        if !self.shim.is_null() {
+            unsafe {
+                let _ = shim::cppshim_video_encoded_unpublish(self.shim, self.conn);
+                shim::cppshim_video_encoded_destroy(self.shim);
+            }
+            self.shim = ptr::null_mut();
         }
     }
 }

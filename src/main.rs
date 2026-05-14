@@ -306,7 +306,7 @@ async fn main() -> Result<()> {
             loop {
                 tokio::select! {
                     biased;
-                    _ = cancel_clone.notified() => return,
+                    _ = cancel_clone.cancelled() => return,
                     ev = renew_rx.recv() => match ev {
                         Some(agora::ConnEvent::TokenWillExpire { current: _ }) => {
                             let sub = substitute_token_cmd(&cmd, &chan, &uid);
@@ -425,7 +425,7 @@ fn substitute_token_cmd(template: &str, channel: &str, rtc_user_id: &str) -> Str
 async fn pump_h264(
     p: agora::video::EncodedVideoPublisher,
     mut stream: ffmpeg::pipeline::PipelineStream,
-    cancel: std::sync::Arc<tokio::sync::Notify>,
+    cancel: std::sync::Arc<agora::CancelToken>,
     session_start: std::time::Instant,
     fps_n: u32, fps_d: u32,
     reconnect_attempts: u32,
@@ -450,7 +450,7 @@ async fn pump_h264(
             };
             tokio::select! {
                 biased;
-                _ = cancel.notified() => return,
+                _ = cancel.cancelled() => return,
                 r = stdout.read(&mut tmp) => r,
             }
         };
@@ -550,7 +550,7 @@ async fn pump_h264(
 async fn pump_aac(
     p: agora::audio::EncodedAudioPublisher,
     mut stream: ffmpeg::pipeline::PipelineStream,
-    cancel: std::sync::Arc<tokio::sync::Notify>,
+    cancel: std::sync::Arc<agora::CancelToken>,
     reconnect_attempts: u32,
     tx: tokio::sync::mpsc::UnboundedSender<agora::ConnEvent>,
 ) {
@@ -569,7 +569,7 @@ async fn pump_aac(
             };
             tokio::select! {
                 biased;
-                _ = cancel.notified() => return,
+                _ = cancel.cancelled() => return,
                 r = stdout.read(&mut tmp) => r,
             }
         };
@@ -647,7 +647,7 @@ async fn pump_aac(
 async fn pump_yuv(
     p: agora::video::RawVideoPublisher,
     mut stream: ffmpeg::pipeline::PipelineStream,
-    cancel: std::sync::Arc<tokio::sync::Notify>,
+    cancel: std::sync::Arc<agora::CancelToken>,
     session_start: std::time::Instant,
     fps_n: u32, fps_d: u32, w: u32, h: u32,
     reconnect_attempts: u32,
@@ -673,7 +673,7 @@ async fn pump_yuv(
             };
             let read_res = tokio::select! {
                 biased;
-                _ = cancel.notified() => return,
+                _ = cancel.cancelled() => return,
                 r = stdout.read(&mut buf[filled..]) => r,
             };
             match read_res {
@@ -743,7 +743,7 @@ async fn pump_yuv(
 async fn pump_pcm(
     p: agora::audio::RawAudioPublisher,
     mut stream: ffmpeg::pipeline::PipelineStream,
-    cancel: std::sync::Arc<tokio::sync::Notify>,
+    cancel: std::sync::Arc<agora::CancelToken>,
     channels: u32,
     reconnect_attempts: u32,
     tx: tokio::sync::mpsc::UnboundedSender<agora::ConnEvent>,
@@ -767,7 +767,7 @@ async fn pump_pcm(
             };
             let read_res = tokio::select! {
                 biased;
-                _ = cancel.notified() => return,
+                _ = cancel.cancelled() => return,
                 r = stdout.read(&mut buf[filled..]) => r,
             };
             match read_res {

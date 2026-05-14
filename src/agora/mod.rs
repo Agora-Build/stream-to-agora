@@ -1,5 +1,6 @@
 //! Safe Rust wrapper over the Agora NG SDK's flat C API.
 mod sys;
+mod shim;
 mod error;
 mod observer;
 mod session;
@@ -15,4 +16,4 @@ pub mod audio;
 pub use error::AgoraError;
 pub use observer::ConnEvent;
 pub use publisher::{decide, AudioPublisher, CodecMode, VideoPublisher};
-pub use session::{RenewHandle, Session, SessionConfig};
+pub use session::{CancelToken, RenewHandle, Session, SessionConfig};

@@ -1,8 +1,18 @@
 # @agora-build/stream-to-agora
 
-Stream a local file (and later `https://` / `rtmp://` / `rtsp://`) to an [Agora](https://www.agora.io) RTC channel as a regular publisher. ffmpeg decodes the source; raw YUV (video) and PCM (audio) frames are pushed to Agora via the SDK's external-source APIs — useful for load testing, demos, simulated participants, and pumping pre-recorded media into a live channel.
+Stream a local file or `http(s)://` / `rtmp://` / `rtsp://` URL to an [Agora](https://www.agora.io) RTC channel as a regular publisher. ffmpeg decodes/demuxes the source; H.264/AAC pass through as-is, anything else is decoded to raw YUV/PCM and pushed via the SDK's external-source APIs — useful for load testing, demos, simulated participants, and pumping pre-recorded media into a live channel.
 
-> **Status: pre-release.** v0.1 is a CLI scaffold; the SDK plumbing lands in the next milestones. The commands below are the intended surface — see the [project README](https://github.com/Agora-Build/stream-to-agora#readme) for the milestone tracker.
+## Features
+
+- **Local files** — any container/codec ffmpeg can read (`./demo.mp4`, `./loop.mkv`, …).
+- **Remote sources** — `http://`, `https://`, `rtmp://`, `rtsp://`.
+- **Encoded passthrough** — H.264 + AAC inputs are demuxed with `-c copy` (zero CPU on our side); the SDK gets the bitstream as-is.
+- **Raw fallback** — anything else (VP9, Opus, MP3, MPEG-2, …) is decoded by ffmpeg to yuv420p + s16le PCM and pushed via the raw senders.
+- **Selective publish** — `--audio-only` / `--video-only`.
+- **Hybrid reconnect** — `http(s)` uses ffmpeg's built-in `-reconnect` flags; RTMP/RTSP respawn the ffmpeg subprocess, bounded by `--reconnect-attempts`.
+- **Token renewal** — `--token-renew-cmd <shell-cmd>` runs your token-minter on `TokenWillExpire` and rotates the token without dropping the channel.
+- **`--loop` forever** — steady-state load testing from a single short file.
+- **ffmpeg passthrough flags** — `--http-header K:V` (repeatable), `--user-agent`, `--rtsp-transport tcp|udp|http`.
 
 ## Install
 
