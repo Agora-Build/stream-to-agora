@@ -2,7 +2,7 @@
 name = "stream-to-agora"
 version = "0.2.1"
 edition = "2024"
-description = "Stream local files (and later https/rtmp/rtsp) to an Agora RTC channel"
+description = "Stream local files or http(s)/rtmp/rtsp URLs to an Agora RTC channel"
 license = "MIT"
 
 [[bin]]
