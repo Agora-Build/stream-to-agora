@@ -172,7 +172,11 @@ fn video_args(mode: CodecMode, codec_name: &str) -> Vec<String> {
             // start. No extra BSF — dump_extra=freq=keyframe rejects
             // mp4-sourced copy streams with "Invalid data found" and
             // yields an empty pipe.
-            let muxer = if codec_name == "hevc" { "hevc" } else { "h264" };
+            let muxer = match codec_name {
+                "hevc" => "hevc",
+                "vp8" | "vp9" | "av1" => "ivf",
+                _ => "h264",
+            };
             vec![
                 "-map".into(), "0:v:0".into(),
                 "-c:v".into(), "copy".into(),
@@ -194,10 +198,15 @@ fn video_args(mode: CodecMode, codec_name: &str) -> Vec<String> {
 fn audio_args(mode: CodecMode, channels: u32, codec_name: &str) -> Vec<String> {
     match mode {
         CodecMode::Encoded => {
-            // AAC → ADTS elementary stream; Opus → Ogg (the only ffmpeg
-            // muxer that frames bare Opus packets — de-Ogg'd by
-            // parse::opus).
-            let muxer = if codec_name == "opus" { "ogg" } else { "adts" };
+            // AAC/HE-AAC → ADTS; Opus → Ogg (only muxer that frames bare
+            // Opus packets, de-Ogg'd by parse::opus); G.711 → raw
+            // µ-law/A-law byte streams (parse::g711 chunks them).
+            let muxer = match codec_name {
+                "opus" => "ogg",
+                "pcm_mulaw" => "mulaw",
+                "pcm_alaw" => "alaw",
+                _ => "adts", // aac / he-aac / he-aacv2
+            };
             vec![
                 "-map".into(), "0:a:0".into(),
                 "-c:a".into(), "copy".into(),
@@ -356,12 +365,15 @@ mod tests {
     fn encoded_video_muxer_follows_codec() {
         assert!(has_pair(&video_args(CodecMode::Encoded, "h264"), "-f", "h264"));
         assert!(has_pair(&video_args(CodecMode::Encoded, "hevc"), "-f", "hevc"));
-        // Unknown / other codecs still take the h264 muxer (decide() only
-        // routes h264/hevc here anyway).
-        assert!(has_pair(&video_args(CodecMode::Encoded, "vp9"), "-f", "h264"));
+        for c in ["vp8", "vp9", "av1"] {
+            assert!(has_pair(&video_args(CodecMode::Encoded, c), "-f", "ivf"), "{c}→ivf");
+        }
+        // Unknown codecs default to the h264 muxer (decide() never routes
+        // them here anyway).
+        assert!(has_pair(&video_args(CodecMode::Encoded, "theora"), "-f", "h264"));
         // Raw is codec-independent.
-        assert!(has_pair(&video_args(CodecMode::Raw, "hevc"), "-f", "rawvideo"));
-        assert!(video_args(CodecMode::Encoded, "h264")
+        assert!(has_pair(&video_args(CodecMode::Raw, "av1"), "-f", "rawvideo"));
+        assert!(video_args(CodecMode::Encoded, "vp9")
             .windows(2)
             .any(|w| w == ["-c:v", "copy"]));
     }
@@ -370,8 +382,10 @@ mod tests {
     fn encoded_audio_muxer_follows_codec() {
         assert!(has_pair(&audio_args(CodecMode::Encoded, 2, "aac"), "-f", "adts"));
         assert!(has_pair(&audio_args(CodecMode::Encoded, 1, "opus"), "-f", "ogg"));
+        assert!(has_pair(&audio_args(CodecMode::Encoded, 1, "pcm_mulaw"), "-f", "mulaw"));
+        assert!(has_pair(&audio_args(CodecMode::Encoded, 1, "pcm_alaw"), "-f", "alaw"));
         assert!(has_pair(&audio_args(CodecMode::Raw, 2, "opus"), "-f", "s16le"));
-        assert!(audio_args(CodecMode::Encoded, 2, "opus")
+        assert!(audio_args(CodecMode::Encoded, 1, "pcm_mulaw")
             .windows(2)
             .any(|w| w == ["-c:a", "copy"]));
     }
