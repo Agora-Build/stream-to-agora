@@ -146,6 +146,14 @@ pub struct Session {
     /// JoinHandles for tokio::spawn'd pump tasks. `Session::run`
     /// takes these and awaits them after notifying cancel.
     pump_handles: tokio::sync::Mutex<Vec<JoinHandle<()>>>,
+    /// No-op LocalUserObserver registered via the C++ shim. Required by
+    /// the SDK before it produces RTP packetization that WebRTC
+    /// subscribers can reassemble. Destroyed in `Drop` before the conn
+    /// goes away.
+    local_user_obs: *mut super::shim::cppshim_local_user_observer,
+    /// No-op C++ IRtcConnectionObserver — required for the video RTCP
+    /// feedback path. Destroyed in Drop before the conn.
+    conn_obs: *mut super::shim::cppshim_conn_observer,
 }
 
 
@@ -208,7 +216,7 @@ impl Session {
         }
 
         // 3. Observer + event channel.
-        let (tx, mut rx) = mpsc::unbounded_channel::<ConnEvent>();
+        let (tx, rx) = mpsc::unbounded_channel::<ConnEvent>();
         let tx_clone = tx.clone();
         observer::set_event_sender(tx);
         let mut observer = Box::new(observer::build_observer());
@@ -225,6 +233,27 @@ impl Session {
             return Err(e);
         }
 
+        // 3b. Register the LocalUserObserver via the C++ shim BEFORE
+        // connect() — the SDK sample does this, and the video media
+        // pipeline only gets wired (onLocalVideoTrackStateChanged fires)
+        // when the observer is present at connect time. Registering it
+        // after connect leaves encoded video stuck at the first frame.
+        let local_user_obs = unsafe { super::shim::cppshim_local_user_observer_register(conn) };
+        if local_user_obs.is_null() {
+            observer::clear_event_sender();
+            unsafe {
+                let _ = sys::agora_rtc_conn_unregister_observer(conn);
+                sys::agora_rtc_conn_destroy(conn);
+                sys::agora_media_node_factory_destroy(factory);
+                sys::agora_service_release(svc);
+            }
+            return Err(AgoraError::null("cppshim_local_user_observer_register"));
+        }
+
+        // (no separate C++ IRtcConnectionObserver — reverted; the
+        // LocalUserObserver above is what wires the video pipeline.)
+        let conn_obs = std::ptr::null_mut();
+
         // 4. Connect.
         let rc = unsafe {
             sys::agora_rtc_conn_connect(conn, token.as_ptr(), channel.as_ptr(), user_id.as_ptr())
@@ -240,73 +269,14 @@ impl Session {
             return Err(e);
         }
 
-        // 5. Wait for on_connected (or a fatal event, or timeout).
-        let deadline = std::time::Instant::now() + cfg.connect_timeout;
-        let conn_id = loop {
-            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-            if remaining.is_zero() {
-                // Treat zero-remaining the same as Elapsed: full teardown, return.
-                observer::clear_event_sender();
-                unsafe {
-                    sys::agora_rtc_conn_disconnect(conn);
-                    let _ = sys::agora_rtc_conn_unregister_observer(conn);
-                    sys::agora_rtc_conn_destroy(conn);
-                    sys::agora_media_node_factory_destroy(factory);
-                    sys::agora_service_release(svc);
-                }
-                return Err(AgoraError::msg("connect", format!(
-                    "timed out after {:?} waiting to connect \
-                     — check app id / token / channel / network",
-                    cfg.connect_timeout)));
-            }
-            match tokio::time::timeout(remaining, rx.recv()).await {
-                Ok(Some(ConnEvent::Connected { conn_id })) => break conn_id,
-                Ok(Some(other)) => match observer::outcome_for(&other) {
-                    Outcome::Fatal { message } => {
-                        observer::clear_event_sender();
-                        unsafe {
-                            sys::agora_rtc_conn_disconnect(conn);
-                            let _ = sys::agora_rtc_conn_unregister_observer(conn);
-                            sys::agora_rtc_conn_destroy(conn);
-                            sys::agora_media_node_factory_destroy(factory);
-                            sys::agora_service_release(svc);
-                        }
-                        return Err(AgoraError::msg("connect", message));
-                    }
-                    // Outcome::Ready was matched above; Outcome::Stop can't arrive
-                    // here because Session.tx (the only handle to the shutdown
-                    // sender) doesn't exist until `connect()` returns Ok.
-                    // Treat both as benign noise and keep waiting.
-                    _ => continue,
-                },
-                Ok(None) => {
-                    observer::clear_event_sender();
-                    unsafe {
-                        sys::agora_rtc_conn_disconnect(conn);
-                        let _ = sys::agora_rtc_conn_unregister_observer(conn);
-                        sys::agora_rtc_conn_destroy(conn);
-                        sys::agora_media_node_factory_destroy(factory);
-                        sys::agora_service_release(svc);
-                    }
-                    return Err(AgoraError::msg("connect", "event channel closed unexpectedly"));
-                }
-                Err(_elapsed) => {
-                    observer::clear_event_sender();
-                    unsafe {
-                        sys::agora_rtc_conn_disconnect(conn);
-                        let _ = sys::agora_rtc_conn_unregister_observer(conn);
-                        sys::agora_rtc_conn_destroy(conn);
-                        sys::agora_media_node_factory_destroy(factory);
-                        sys::agora_service_release(svc);
-                    }
-                    return Err(AgoraError::msg("connect", format!(
-                        "timed out after {:?} waiting to connect \
-                         — check app id / token / channel / network",
-                        cfg.connect_timeout)));
-                }
-            }
-        };
-
+        // 5. Connection is in progress (async). We do NOT block here —
+        // the caller publishes its tracks first, THEN calls
+        // `wait_connected()`. This mirrors the SDK sample's order
+        // (publishVideo/publishAudio before waitUntilConnected) so the
+        // tracks join the initial SDP offer rather than forcing a
+        // renegotiation after the connection is already up. Video RTP
+        // packetization only works correctly under the former.
+        // local_user_obs was registered in step 3b (before connect()).
         Ok(Session {
             svc,
             conn,
@@ -318,10 +288,50 @@ impl Session {
             _user_id: user_id,
             rx,
             tx: tx_clone,
-            conn_id,
+            conn_id: 0, // set by wait_connected()
             cancel: CancelToken::new(),
             pump_handles: tokio::sync::Mutex::new(Vec::new()),
+            local_user_obs,
+            conn_obs,
         })
+    }
+
+    /// Block until the SDK fires `on_connected` (or a fatal event /
+    /// timeout). Call this AFTER publishing tracks — see the ordering
+    /// note in `connect()`. On failure the `Session` is dropped by the
+    /// caller (`?`), and `Drop` performs the full SDK teardown.
+    pub async fn wait_connected(&mut self, timeout: Duration) -> Result<(), AgoraError> {
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                return Err(AgoraError::msg("connect", format!(
+                    "timed out after {timeout:?} waiting to connect \
+                     — check app id / token / channel / network")));
+            }
+            match tokio::time::timeout(remaining, self.rx.recv()).await {
+                Ok(Some(ConnEvent::Connected { conn_id })) => {
+                    self.conn_id = conn_id;
+                    return Ok(());
+                }
+                Ok(Some(other)) => match observer::outcome_for(&other) {
+                    Outcome::Fatal { message } => {
+                        return Err(AgoraError::msg("connect", message));
+                    }
+                    // Ready is matched above; Stop can't arrive (no shutdown
+                    // sender handed out yet). Benign noise — keep waiting.
+                    _ => continue,
+                },
+                Ok(None) => {
+                    return Err(AgoraError::msg("connect", "event channel closed unexpectedly"));
+                }
+                Err(_elapsed) => {
+                    return Err(AgoraError::msg("connect", format!(
+                        "timed out after {timeout:?} waiting to connect \
+                         — check app id / token / channel / network")));
+                }
+            }
+        }
     }
 
     /// Hand out a clonable sender so the SIGINT handler (and a `--duration`
@@ -415,6 +425,15 @@ impl Drop for Session {
         // Best-effort teardown in the required order. Errors can't propagate
         // from Drop; log them.
         unsafe {
+            // C++ observers before conn teardown (they borrow conn/local-user).
+            if !self.conn_obs.is_null() {
+                super::shim::cppshim_conn_observer_destroy(self.conn_obs);
+                self.conn_obs = std::ptr::null_mut();
+            }
+            if !self.local_user_obs.is_null() {
+                super::shim::cppshim_local_user_observer_destroy(self.local_user_obs);
+                self.local_user_obs = std::ptr::null_mut();
+            }
             let rc = sys::agora_rtc_conn_disconnect(self.conn);
             if rc != 0 {
                 eprintln!("warning: agora_rtc_conn_disconnect returned {rc}");

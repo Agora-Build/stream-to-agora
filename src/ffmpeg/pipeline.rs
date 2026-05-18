@@ -169,6 +169,11 @@ fn video_args(mode: CodecMode) -> Vec<String> {
             "-map".into(), "0:v:0".into(),
             "-c:v".into(), "copy".into(),
             "-an".into(),
+            // `-f h264` auto-applies the h264_mp4toannexb BSF which
+            // inserts SPS+PPS into the bitstream at file start. No
+            // extra BSF — dump_extra=freq=keyframe rejects mp4-sourced
+            // copy streams with "Invalid data found" and yields an
+            // empty pipe.
             "-f".into(), "h264".into(),
             "pipe:1".into(),
         ],

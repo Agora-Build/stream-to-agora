@@ -179,6 +179,25 @@ The shim takes the existing flat-C service/connection/factory handles (which Rus
 
 If/when Agora fixes the C ABI, the shim can be deleted and the encoded publishers in `src/agora/{video,audio}.rs` can switch back to the flat-C `agora_*_sender_send` calls.
 
+### Resolved: encoded video rendered black at subscribers
+
+Earlier the encoded path connected and the SDK accepted every frame, yet
+WebRTC subscribers showed black video and flooded the sender with
+intra-frame (keyframe) requests; audio was unaffected. Root cause was the
+H.264 access-unit splitter (`parse::h264::next_au`): it cut a new frame at
+every *second* VCL slice, so at each GOP boundary the IDR was emitted
+*without* its SPS/PPS (those got glued onto the preceding delta frame).
+A decoder can't initialize from an IDR with no parameter sets, so it never
+produced a frame and kept asking for a keyframe.
+
+Fixed by making the splitter group SPS+PPS+IDR into one keyframe access
+unit — byte-for-byte matching the SDK sample's
+`HelperH264FileParser::getH264Frame` (boundary at the next non-VCL NAL or
+a slice with `first_mb_in_slice == 0`). Verified end-to-end against the
+same channel as the SDK sample: subscriber decodes, no intra-request
+flood. The shim no longer strips SEI or overrides `captureTimeMs` — both
+were earlier mis-diagnoses that deviated from the working sample.
+
 ## Development
 
 ```bash
