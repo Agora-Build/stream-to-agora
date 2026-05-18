@@ -202,9 +202,10 @@ async fn main() -> Result<()> {
 
     // ── Create publishers and apply video metadata ────────────────────
     let audio_codec = info.audio.as_ref().map(|a| a.codec_name.clone()).unwrap_or_default();
+    let audio_profile = info.audio.as_ref().and_then(|a| a.profile.clone());
     let video_codec = info.video.as_ref().map(|v| v.codec_name.clone()).unwrap_or_default();
     let mut audio_pub_opt = if info.audio.is_some() && !cli.video_only {
-        Some(session.create_audio_publisher(mode, &audio_codec)?)
+        Some(session.create_audio_publisher(mode, &audio_codec, audio_profile.as_deref())?)
     } else { None };
     let mut video_pub_opt = if info.video.is_some() && !cli.audio_only {
         Some(session.create_video_publisher(mode, &video_codec)?)
@@ -275,6 +276,7 @@ async fn main() -> Result<()> {
     let video_tx = session.sender();
     let audio_tx = session.sender();
     let audio_channels = info.audio.as_ref().and_then(|a| a.channels).unwrap_or(2).max(1);
+    let audio_sr = info.audio.as_ref().and_then(|a| a.sample_rate).unwrap_or(8000).max(1);
 
     // Video-thread handle: the encoded-video pump runs on a dedicated OS
     // thread (not a tokio worker) so every sendEncodedVideoImage call
@@ -290,13 +292,21 @@ async fn main() -> Result<()> {
                     let c = cancel.clone();
                     let tx = video_tx.clone();
                     let ra = cli.reconnect_attempts;
+                    let ivf_codec = match video_codec.as_str() {
+                        "vp8" => Some(parse::ivf::IvfCodec::Vp8),
+                        "vp9" => Some(parse::ivf::IvfCodec::Vp9),
+                        "av1" => Some(parse::ivf::IvfCodec::Av1),
+                        _ => None,
+                    };
                     let is_hevc = video_codec == "hevc";
                     video_os_thread = Some(std::thread::Builder::new()
                         .name("video-pump".into())
                         .spawn(move || {
                             let rt = tokio::runtime::Builder::new_current_thread()
                                 .enable_all().build().expect("video-pump runtime");
-                            if is_hevc {
+                            if let Some(ic) = ivf_codec {
+                                rt.block_on(pump_ivf(vp, vs, c, session_start, fps_n, fps_d, ra, tx, ic));
+                            } else if is_hevc {
                                 rt.block_on(pump_hevc(vp, vs, c, session_start, fps_n, fps_d, ra, tx));
                             } else {
                                 rt.block_on(pump_h264(vp, vs, c, session_start, fps_n, fps_d, ra, tx));
@@ -315,10 +325,10 @@ async fn main() -> Result<()> {
         if let Some(as_) = audio_stream {
             match ap {
                 agora::AudioPublisher::Encoded(ap) => {
-                    let jh = if audio_codec == "opus" {
-                        tokio::spawn(pump_opus(ap, as_, cancel.clone(), session_start, cli.reconnect_attempts, audio_tx.clone()))
-                    } else {
-                        tokio::spawn(pump_aac(ap, as_, cancel.clone(), session_start, cli.reconnect_attempts, audio_tx.clone()))
+                    let jh = match audio_codec.as_str() {
+                        "opus" => tokio::spawn(pump_opus(ap, as_, cancel.clone(), session_start, cli.reconnect_attempts, audio_tx.clone())),
+                        "pcm_mulaw" | "pcm_alaw" => tokio::spawn(pump_g711(ap, as_, cancel.clone(), session_start, audio_sr, audio_channels, cli.reconnect_attempts, audio_tx.clone())),
+                        _ => tokio::spawn(pump_aac(ap, as_, cancel.clone(), session_start, cli.reconnect_attempts, audio_tx.clone())),
                     };
                     session.register_pump(jh).await;
                 }
@@ -710,6 +720,127 @@ async fn pump_hevc(
     }
 }
 
+/// VP8 / VP9 / AV1 encoded-video pump. Same respawn / fps-pacing /
+/// dedicated-thread contract as `pump_hevc`; IVF framing is
+/// length-prefixed so `IvfReader::pull` owns draining the buffer
+/// (returns owned frames), like `pump_opus`.
+async fn pump_ivf(
+    p: agora::video::EncodedVideoPublisher,
+    mut stream: ffmpeg::pipeline::PipelineStream,
+    cancel: std::sync::Arc<agora::CancelToken>,
+    session_start: std::time::Instant,
+    fps_n: u32, fps_d: u32,
+    reconnect_attempts: u32,
+    tx: tokio::sync::mpsc::UnboundedSender<agora::ConnEvent>,
+    codec: parse::ivf::IvfCodec,
+) {
+    use tokio::io::AsyncReadExt;
+    let mut buf = Vec::with_capacity(256 * 1024);
+    let mut tmp = vec![0u8; 64 * 1024];
+    let mut reader = parse::ivf::IvfReader::new(codec);
+    let mut frame_idx: u64 = 0;
+    let fps_n = fps_n.max(1) as u64;
+    let fps_d = fps_d.max(1) as u64;
+    let mut consecutive_failures: u32 = 0;
+    let mut last_respawn_at: Option<std::time::Instant> = None;
+    let mut pushed_since_last_respawn: bool = true;
+
+    loop {
+        let n_or_eof = {
+            let stdout = match stream.stdout() {
+                Some(s) => s,
+                None => return,
+            };
+            tokio::select! {
+                biased;
+                _ = cancel.cancelled() => return,
+                r = stdout.read(&mut tmp) => r,
+            }
+        };
+        match n_or_eof {
+            Ok(0) => {
+                if stream.kind().is_remote() && consecutive_failures < reconnect_attempts {
+                    if pushed_since_last_respawn {
+                        consecutive_failures = 0;
+                    }
+                    eprintln!(
+                        "video pump: source EOF; respawning ffmpeg (attempt {}/{})",
+                        consecutive_failures + 1, reconnect_attempts,
+                    );
+                    if let Err(e) = stream.respawn().await {
+                        let _ = tx.send(agora::ConnEvent::Failed {
+                            code: 0,
+                            msg: format!("video respawn failed: {e}"),
+                        });
+                        return;
+                    }
+                    last_respawn_at = Some(std::time::Instant::now());
+                    consecutive_failures += 1;
+                    pushed_since_last_respawn = false;
+                    buf.clear();
+                    reader = parse::ivf::IvfReader::new(codec); // drop partial IVF state
+                    continue;
+                }
+                if consecutive_failures >= reconnect_attempts && stream.kind().is_remote() {
+                    let _ = tx.send(agora::ConnEvent::Failed {
+                        code: 0,
+                        msg: format!(
+                            "RTMP/RTSP source unreachable after {} attempts",
+                            reconnect_attempts,
+                        ),
+                    });
+                }
+                return;
+            }
+            Ok(n) => {
+                buf.extend_from_slice(&tmp[..n]);
+            }
+            Err(e) => {
+                let _ = tx.send(agora::ConnEvent::Failed {
+                    code: 0,
+                    msg: format!("ffmpeg video pipe: {e}"),
+                });
+                return;
+            }
+        }
+
+        loop {
+            match reader.pull(&mut buf) {
+                Ok(None) => break,
+                Err(e) => {
+                    let _ = tx.send(agora::ConnEvent::Failed {
+                        code: 0,
+                        msg: format!("parse ivf: {e}"),
+                    });
+                    return;
+                }
+                Ok(Some(frame)) => {
+                    let target = session_start + std::time::Duration::from_micros(
+                        frame_idx * 1_000_000 * fps_d / fps_n
+                    );
+                    tokio::time::sleep_until(tokio::time::Instant::from_std(target)).await;
+                    let pts_ms = (frame_idx as i64) * 1000 * fps_d as i64 / fps_n as i64;
+                    if let Err(e) = p.push_video(&frame.data, frame.is_keyframe, pts_ms) {
+                        let _ = tx.send(agora::ConnEvent::Failed {
+                            code: e.code.unwrap_or(0),
+                            msg: e.to_string(),
+                        });
+                        return;
+                    }
+                    frame_idx += 1;
+                    pushed_since_last_respawn = true;
+                    if let Some(t) = last_respawn_at {
+                        if t.elapsed() >= std::time::Duration::from_secs(2) {
+                            consecutive_failures = 0;
+                            last_respawn_at = None;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 async fn pump_aac(
     p: agora::audio::EncodedAudioPublisher,
     mut stream: ffmpeg::pipeline::PipelineStream,
@@ -920,6 +1051,107 @@ async fn pump_opus(
                     }
                 }
             }
+        }
+    }
+}
+
+/// G.711 (µ-law / A-law) encoded-audio pump. Same respawn / pacing
+/// contract as `pump_aac`; the raw stream has no in-band framing so
+/// `parse::g711::next_frame` slices fixed 20 ms chunks.
+async fn pump_g711(
+    p: agora::audio::EncodedAudioPublisher,
+    mut stream: ffmpeg::pipeline::PipelineStream,
+    cancel: std::sync::Arc<agora::CancelToken>,
+    session_start: std::time::Instant,
+    sample_rate: u32,
+    channels: u32,
+    reconnect_attempts: u32,
+    tx: tokio::sync::mpsc::UnboundedSender<agora::ConnEvent>,
+) {
+    use tokio::io::AsyncReadExt;
+    let mut buf = Vec::with_capacity(64 * 1024);
+    let mut tmp = vec![0u8; 8 * 1024];
+    let mut frame_idx: u64 = 0;
+    let mut consecutive_failures: u32 = 0;
+    let mut last_respawn_at: Option<std::time::Instant> = None;
+    let mut pushed_since_last_respawn: bool = true;
+
+    loop {
+        let n_or_eof = {
+            let stdout = match stream.stdout() {
+                Some(s) => s,
+                None => return,
+            };
+            tokio::select! {
+                biased;
+                _ = cancel.cancelled() => return,
+                r = stdout.read(&mut tmp) => r,
+            }
+        };
+        match n_or_eof {
+            Ok(0) => {
+                if stream.kind().is_remote() && consecutive_failures < reconnect_attempts {
+                    if pushed_since_last_respawn { consecutive_failures = 0; }
+                    eprintln!(
+                        "audio pump: source EOF; respawning ffmpeg (attempt {}/{})",
+                        consecutive_failures + 1, reconnect_attempts,
+                    );
+                    if let Err(e) = stream.respawn().await {
+                        let _ = tx.send(agora::ConnEvent::Failed {
+                            code: 0, msg: format!("audio respawn failed: {e}"),
+                        });
+                        return;
+                    }
+                    last_respawn_at = Some(std::time::Instant::now());
+                    consecutive_failures += 1;
+                    pushed_since_last_respawn = false;
+                    buf.clear();
+                    continue;
+                }
+                if consecutive_failures >= reconnect_attempts && stream.kind().is_remote() {
+                    let _ = tx.send(agora::ConnEvent::Failed {
+                        code: 0,
+                        msg: format!("RTMP/RTSP source unreachable after {} attempts", reconnect_attempts),
+                    });
+                }
+                return;
+            }
+            Ok(n) => buf.extend_from_slice(&tmp[..n]),
+            Err(e) => {
+                let _ = tx.send(agora::ConnEvent::Failed {
+                    code: 0, msg: format!("ffmpeg audio pipe: {e}"),
+                });
+                return;
+            }
+        }
+
+        loop {
+            let Some(f) = parse::g711::next_frame(&buf, sample_rate, channels, 20) else {
+                break;
+            };
+            let len = f.data.len();
+            let sr = f.sample_rate;
+            let spc = f.samples_per_channel;
+            let ch = f.channels;
+            let target = session_start + std::time::Duration::from_micros(
+                frame_idx * 1_000_000 * spc as u64 / sr.max(1) as u64,
+            );
+            tokio::time::sleep_until(tokio::time::Instant::from_std(target)).await;
+            if let Err(e) = p.push_audio(&buf[..len], sr, spc, ch) {
+                let _ = tx.send(agora::ConnEvent::Failed {
+                    code: e.code.unwrap_or(0), msg: e.to_string(),
+                });
+                return;
+            }
+            frame_idx += 1;
+            pushed_since_last_respawn = true;
+            if let Some(t) = last_respawn_at {
+                if t.elapsed() >= std::time::Duration::from_secs(2) {
+                    consecutive_failures = 0;
+                    last_respawn_at = None;
+                }
+            }
+            buf.drain(..len);
         }
     }
 }

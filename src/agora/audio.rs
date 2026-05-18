@@ -14,13 +14,33 @@ use super::sys;
 
 /// AUDIO_CODEC_TYPE ints from the SDK's AgoraBase.h.
 const AUDIO_CODEC_OPUS: i32 = 1;
+const AUDIO_CODEC_PCMA: i32 = 3;
+const AUDIO_CODEC_PCMU: i32 = 4;
 const AUDIO_CODEC_AACLC: i32 = 8;
+const AUDIO_CODEC_HEAAC: i32 = 9;
+const AUDIO_CODEC_HEAAC2: i32 = 11;
 
-/// Map ffprobe's codec name to the shim's AUDIO_CODEC_TYPE int.
-fn audio_codec(codec_name: &str) -> i32 {
+/// Map ffprobe's `codec_name` (+ `profile` for the AAC family) to the
+/// shim's AUDIO_CODEC_TYPE int.
+///
+/// HE-AAC note: ffmpeg's ADTS muxer uses *implicit* SBR signalling, so
+/// the ADTS header carries the AAC core sample rate and one frame is
+/// 1024 core samples. 1024/core == 2048/(2·core), i.e. the per-frame
+/// duration is identical whether expressed at the core or the doubled
+/// SBR rate — so `parse::aac`'s 1024-samples / core-rate values keep the
+/// SDK's timestamp clock correct unchanged; only the codec id needs to
+/// say HE-AAC so the SDK enables SBR decode.
+fn audio_codec(codec_name: &str, profile: Option<&str>) -> i32 {
     match codec_name {
         "opus" => AUDIO_CODEC_OPUS,
-        _ => AUDIO_CODEC_AACLC, // aac
+        "pcm_mulaw" => AUDIO_CODEC_PCMU,
+        "pcm_alaw" => AUDIO_CODEC_PCMA,
+        "aac" => match profile {
+            Some(p) if p.eq_ignore_ascii_case("HE-AACv2") => AUDIO_CODEC_HEAAC2,
+            Some(p) if p.eq_ignore_ascii_case("HE-AAC") => AUDIO_CODEC_HEAAC,
+            _ => AUDIO_CODEC_AACLC,
+        },
+        _ => AUDIO_CODEC_AACLC,
     }
 }
 
@@ -48,8 +68,9 @@ pub(super) fn create_encoded(
     conn: *mut c_void,
     factory: *mut c_void,
     codec_name: &str,
+    profile: Option<&str>,
 ) -> Result<EncodedAudioPublisher, AgoraError> {
-    let codec = audio_codec(codec_name);
+    let codec = audio_codec(codec_name, profile);
     let p = unsafe { shim::cppshim_audio_encoded_create(svc, factory, codec) };
     if p.is_null() {
         return Err(AgoraError::null("cppshim_audio_encoded_create"));

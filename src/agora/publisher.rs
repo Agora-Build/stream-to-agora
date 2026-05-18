@@ -22,18 +22,19 @@ pub enum CodecMode {
 /// `agora_video_encoded_image_sender_send` **AND** for which our current
 /// ffmpeg pipeline output format (`-f h264`, Annex-B) is correct.
 ///
-/// Passthrough video codecs: H.264 (`-f h264`) and H.265/HEVC
-/// (`-f hevc`), both Annex-B, parsed by `parse::h264` / `parse::hevc`.
-/// Anything else (VP8/VP9/AV1/mjpeg/MPEG-2/…) falls through to the Raw
-/// path and is decoded → yuv420p, which works for every codec ffmpeg can
-/// decode.
-const VIDEO_ENCODED_OK: &[&str] = &["h264", "hevc"];
+/// Passthrough video codecs: H.264/H.265 (Annex-B, `-f h264`/`-f hevc`,
+/// `parse::h264`/`parse::hevc`) and VP8/VP9/AV1 (IVF, `-f ivf`,
+/// `parse::ivf`). Anything else (mjpeg/MPEG-2/Theora/…) falls through to
+/// the Raw path and is decoded → yuv420p, which works for every codec
+/// ffmpeg can decode.
+const VIDEO_ENCODED_OK: &[&str] = &["h264", "hevc", "vp8", "vp9", "av1"];
 
-/// Passthrough audio codecs: AAC (`-f adts`) and Opus (`-f ogg`, then
-/// de-Ogg'd by `parse::opus`). Everything else (PCMA/PCMU/G.722/MP3/…)
-/// falls through to the Raw path and is decoded → s16le, which works for
-/// every codec ffmpeg can decode.
-const AUDIO_ENCODED_OK: &[&str] = &["aac", "opus"];
+/// Passthrough audio codecs: AAC/HE-AAC/HE-AACv2 (`-f adts`,
+/// `parse::aac`; profile picks the SDK codec id), Opus (`-f ogg`,
+/// `parse::opus`), and G.711 µ-law/A-law (`-f mulaw`/`-f alaw`,
+/// `parse::g711`). Everything else (G.722/MP3/AC-3/FLAC/…) falls through
+/// to the Raw path and is decoded → s16le.
+const AUDIO_ENCODED_OK: &[&str] = &["aac", "opus", "pcm_mulaw", "pcm_alaw"];
 
 /// Pure mode-decision. Encoded if *both* present streams use accepted
 /// codecs; otherwise Raw. A video-only or audio-only input takes only
@@ -117,10 +118,12 @@ pub(super) fn create_audio(
     factory: *mut c_void,
     mode: CodecMode,
     codec_name: &str,
+    profile: Option<&str>,
 ) -> Result<AudioPublisher, AgoraError> {
     match mode {
         CodecMode::Encoded => {
-            create_audio_encoded(svc, conn, factory, codec_name).map(AudioPublisher::Encoded)
+            create_audio_encoded(svc, conn, factory, codec_name, profile)
+                .map(AudioPublisher::Encoded)
         }
         CodecMode::Raw => create_audio_raw(svc, conn, factory).map(AudioPublisher::Raw),
     }
@@ -161,7 +164,7 @@ mod tests {
     #[test]
     fn h264_aac_picks_encoded()  { assert_eq!(decide(&info(H264_AAC)),  CodecMode::Encoded); }
     #[test]
-    fn vp9_opus_picks_raw()      { assert_eq!(decide(&info(VP9_OPUS)),  CodecMode::Raw); }
+    fn vp9_opus_picks_encoded()  { assert_eq!(decide(&info(VP9_OPUS)),  CodecMode::Encoded); }
     #[test]
     fn mpeg2_mp3_picks_raw()     { assert_eq!(decide(&info(MPEG2_MP3)), CodecMode::Raw); }
 
@@ -183,28 +186,40 @@ mod tests {
     }
 
     #[test]
-    fn hevc_and_opus_combinations_pick_encoded() {
-        // h264+opus, hevc+aac, hevc+opus all pass the widened allowlists.
-        for (v, a) in [("h264", "opus"), ("hevc", "aac"), ("hevc", "opus")] {
-            let mut i = info(H264_AAC);
-            i.video.as_mut().unwrap().codec_name = v.into();
-            i.audio.as_mut().unwrap().codec_name = a.into();
-            assert_eq!(decide(&i), CodecMode::Encoded, "{v}+{a} should be Encoded");
+    fn widened_codec_combinations_pick_encoded() {
+        // Every video ∈ {h264,hevc,vp8,vp9,av1} × audio ∈
+        // {aac,opus,pcm_mulaw,pcm_alaw} passes the widened allowlists.
+        let vids = ["h264", "hevc", "vp8", "vp9", "av1"];
+        let auds = ["aac", "opus", "pcm_mulaw", "pcm_alaw"];
+        for v in vids {
+            for a in auds {
+                let mut i = info(H264_AAC);
+                i.video.as_mut().unwrap().codec_name = v.into();
+                i.audio.as_mut().unwrap().codec_name = a.into();
+                assert_eq!(decide(&i), CodecMode::Encoded, "{v}+{a} should be Encoded");
+            }
         }
     }
 
     #[test]
-    fn hevc_video_only_picks_encoded() {
-        let mut i = info(H264_AAC);
-        i.video.as_mut().unwrap().codec_name = "hevc".into();
-        i.audio = None;
-        assert_eq!(decide(&i), CodecMode::Encoded);
+    fn new_video_codecs_video_only_pick_encoded() {
+        for v in ["hevc", "vp8", "vp9", "av1"] {
+            let mut i = info(H264_AAC);
+            i.video.as_mut().unwrap().codec_name = v.into();
+            i.audio = None;
+            assert_eq!(decide(&i), CodecMode::Encoded, "{v} video-only");
+        }
     }
 
     #[test]
-    fn vp9_with_opus_still_raw_because_video_unsupported() {
-        // Opus is now allowed, but VP9 is not → still Raw.
-        assert_eq!(decide(&info(VP9_OPUS)), CodecMode::Raw);
+    fn still_unsupported_codecs_force_raw() {
+        // A codec outside the allowlists still drags the session to Raw.
+        let mut i = info(H264_AAC);
+        i.video.as_mut().unwrap().codec_name = "mpeg2video".into();
+        assert_eq!(decide(&i), CodecMode::Raw, "mpeg2video → Raw");
+        let mut i = info(H264_AAC); // h264 ok, but g.722 audio not in list
+        i.audio.as_mut().unwrap().codec_name = "g722".into();
+        assert_eq!(decide(&i), CodecMode::Raw, "h264+g722 → Raw");
     }
 
     #[test]

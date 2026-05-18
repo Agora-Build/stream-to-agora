@@ -104,6 +104,10 @@ fail_run() {
 echo "─── Local file ───"
 run local-encoded       tests/fixtures/loop-3s.mp4
 run local-hevc-opus     tests/fixtures/hevc-opus-5s.mp4
+run local-vp8-opus      tests/fixtures/vp8-opus-5s.webm
+run local-vp9-opus      tests/fixtures/vp9-opus-5s.webm
+run local-av1-aac       tests/fixtures/av1-aac-5s.mp4
+run local-h264-g711u    tests/fixtures/h264-g711u-5s.mkv
 run local-audio-only    tests/fixtures/loop-3s.mp4 --audio-only
 run local-video-only    tests/fixtures/loop-3s.mp4 --video-only
 run local-loop          tests/fixtures/loop-3s.mp4 --loop
@@ -120,6 +124,11 @@ run https-hevc-4k       https://lf-tk-sg.ibytedtos.com/obj/tcs-client-sg/resourc
 # 4K HEVC Main-10 (10-bit) + AAC-LC stereo — HEVC video AND AAC audio
 # encoded-passthrough together, with real sound, from a remote URL.
 run https-hevc-4k-aac   https://lf-tk-sg.ibytedtos.com/obj/tcs-client-sg/resources/hevc_4k24P_main10_1.mp4
+# Real VP8 / VP9 / AV1 1080p (video-only) — IVF encoded-passthrough
+# path (parse::ivf, -f ivf) from remote URLs.
+run https-vp8-1080      https://test-videos.co.uk/vids/bigbuckbunny/webm/vp8/1080/Big_Buck_Bunny_1080_10s_30MB.webm --video-only
+run https-vp9-1080      https://test-videos.co.uk/vids/bigbuckbunny/webm/vp9/1080/Big_Buck_Bunny_1080_10s_30MB.webm --video-only
+run https-av1-1080      https://test-videos.co.uk/vids/bigbuckbunny/mp4/av1/1080/Big_Buck_Bunny_1080_10s_20MB.mp4 --video-only
 
 echo ""
 echo "─── HTTPS HLS ───"

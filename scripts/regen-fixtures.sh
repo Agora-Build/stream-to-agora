@@ -84,7 +84,53 @@ regen_hevc_opus_5s() {
       hevc-opus-5s.mp4
 }
 
-ALL="loop-3s motion-pattern-5s smptebars-30fps-stereo-5s bbb-30s sintel-15s hevc-opus-5s"
+regen_vp8_opus_5s() {
+    echo "→ vp8-opus-5s.webm (VP8 + Opus encoded-passthrough fixture)"
+    ffmpeg -hide_banner -loglevel error -y \
+      -f lavfi -i "testsrc=duration=5:size=320x240:rate=15" \
+      -f lavfi -i "sine=frequency=440:duration=5" \
+      -c:v libvpx -b:v 300k -g 15 -keyint_min 15 -deadline realtime \
+      -c:a libopus -ar 48000 -ac 1 -b:a 64k -shortest \
+      vp8-opus-5s.webm
+}
+
+regen_vp9_opus_5s() {
+    echo "→ vp9-opus-5s.webm (VP9 + Opus encoded-passthrough fixture)"
+    ffmpeg -hide_banner -loglevel error -y \
+      -f lavfi -i "testsrc=duration=5:size=320x240:rate=15" \
+      -f lavfi -i "sine=frequency=440:duration=5" \
+      -c:v libvpx-vp9 -b:v 300k -g 15 -keyint_min 15 -deadline realtime \
+      -c:a libopus -ar 48000 -ac 1 -b:a 64k -shortest \
+      vp9-opus-5s.webm
+}
+
+regen_av1_aac_5s() {
+    echo "→ av1-aac-5s.mp4 (AV1 + AAC encoded-passthrough fixture)"
+    ffmpeg -hide_banner -loglevel error -y \
+      -f lavfi -i "testsrc=duration=5:size=320x240:rate=15" \
+      -f lavfi -i "sine=frequency=440:duration=5" \
+      -c:v libsvtav1 -preset 10 -g 15 \
+      -c:a aac -ar 48000 -ac 1 -b:a 96k -shortest \
+      av1-aac-5s.mp4
+}
+
+regen_h264_g711u_5s() {
+    echo "→ h264-g711u-5s.mkv (H.264 + G.711 µ-law encoded-passthrough fixture)"
+    ffmpeg -hide_banner -loglevel error -y \
+      -f lavfi -i "testsrc=duration=5:size=320x240:rate=15" \
+      -f lavfi -i "sine=frequency=440:duration=5" \
+      $X264_BASELINE -x264-params "slices=1:keyint=15" \
+      -c:a pcm_mulaw -ar 8000 -ac 1 -shortest \
+      h264-g711u-5s.mkv
+}
+
+# NOTE: an HE-AAC fixture requires an ffmpeg built with libfdk_aac
+# (`-c:a libfdk_aac -profile:a aac_he`); the stock encoder has no HE
+# profile. The HE-AAC code path is covered by `src/agora/audio.rs`
+# unit tests + `decide()` coverage; live-verify with a real HE-AAC
+# source when an fdk-enabled ffmpeg is available.
+
+ALL="loop-3s motion-pattern-5s smptebars-30fps-stereo-5s bbb-30s sintel-15s hevc-opus-5s vp8-opus-5s vp9-opus-5s av1-aac-5s h264-g711u-5s"
 
 if [ $# -eq 0 ]; then
     for f in $ALL; do
