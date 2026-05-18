@@ -142,16 +142,24 @@ cppshim_video_pub* cppshim_video_encoded_create(
 
     ar::SenderOptions opts;
     // C++ defaults: ccMode=CC_ENABLED, codecType=H265, targetBitrate=6500.
-    // The SDK's own sample uses the default codecType=H265 even when sending
-    // H.264 — the per-frame EncodedVideoFrameInfo.codecType is what routes.
-    // We still respect a non-zero `codec_type` argument for callers that
-    // want to be explicit.
+    // The H.264 sample leaves these at default (proven by the v0.2.2
+    // release — callers pass codec_type=0 for H.264 to preserve it); the
+    // per-frame EncodedVideoFrameInfo.codecType is what routes the bytes.
     if (codec_type != 0) {
         opts.codecType = static_cast<ar::VIDEO_CODEC_TYPE>(codec_type);
     }
 
     auto track = service->createCustomVideoTrack(sender, opts);
     if (!track) return nullptr;
+
+    // H.265: mirror sample_send_h265 — pin the track's encoder config to
+    // H265 as well. H.264 deliberately skips this (matches the proven
+    // sample_send_h264_pcm, which sets no encoder configuration).
+    if (codec_type == 3) {
+        ar::VideoEncoderConfiguration ec;
+        ec.codecType = ar::VIDEO_CODEC_H265;
+        track->setVideoEncoderConfiguration(ec);
+    }
 
     return new cppshim_video_pub{sender, track};
 }
@@ -162,20 +170,25 @@ int cppshim_video_encoded_send(
     uint32_t len,
     int is_keyframe,
     int fps,
+    int codec_type,
     int64_t capture_time_ms) {
     if (!p || !p->sender || !buf || len == 0) return -1;
 
-    // Send the AU exactly as the upstream H.264 splitter produced it
-    // (leading SEI/SPS/PPS included) — byte-for-byte what the SDK sample's
-    // sendOneH264Frame does. Stripping SEI or setting captureTimeMs are
+    // Send the AU exactly as the upstream splitter produced it (leading
+    // VPS/SPS/PPS/SEI included) — byte-for-byte what the SDK samples'
+    // sendOneH26xFrame do. Stripping SEI or setting captureTimeMs are
     // both deviations from the sample that broke subscriber decode; the
-    // splitter (parse::h264::next_au) already groups SPS+PPS+IDR into the
-    // keyframe AU, and framesPerSecond alone drives the SDK timestamping.
+    // splitter (parse::h264 / parse::hevc) already groups the parameter
+    // sets into the keyframe AU, and framesPerSecond alone drives the
+    // SDK timestamping. `codec_type` (0 → H264) selects the per-frame
+    // codec, which is what actually routes the bitstream.
     (void)capture_time_ms;
 
     ar::EncodedVideoFrameInfo info;
     info.rotation = ar::VIDEO_ORIENTATION_0;
-    info.codecType = ar::VIDEO_CODEC_H264;
+    info.codecType = codec_type
+        ? static_cast<ar::VIDEO_CODEC_TYPE>(codec_type)
+        : ar::VIDEO_CODEC_H264;
     info.framesPerSecond = fps;
     info.frameType = is_keyframe
         ? ar::VIDEO_FRAME_TYPE_KEY_FRAME
@@ -219,7 +232,8 @@ extern "C" {
 
 cppshim_audio_pub* cppshim_audio_encoded_create(
     void* c_service_handle,
-    void* c_factory_handle) {
+    void* c_factory_handle,
+    int codec) {
     auto* service = deref_c_handle<ab::IAgoraService>(c_service_handle);
     auto* factory = deref_c_handle<ar::IMediaNodeFactory>(c_factory_handle);
     if (!service || !factory) return nullptr;
@@ -227,27 +241,32 @@ cppshim_audio_pub* cppshim_audio_encoded_create(
     auto sender = factory->createAudioEncodedFrameSender();
     if (!sender) return nullptr;
 
-    // TMixMode::MIX_ENABLED (0) — matches the previous flat-C call where we
-    // passed mix_mode=0. Either value works for a single-source track.
-    auto track = service->createCustomAudioTrack(sender, agora::base::MIX_ENABLED);
+    // Mix mode follows the SDK samples: AAC (sample_send_aac) uses
+    // MIX_ENABLED — the proven v0.2.2 path; Opus (sample_send_opus) uses
+    // MIX_DISABLED.
+    auto mix = (codec == 8) ? agora::base::MIX_ENABLED
+                            : agora::base::MIX_DISABLED;
+    auto track = service->createCustomAudioTrack(sender, mix);
     if (!track) return nullptr;
 
     return new cppshim_audio_pub{sender, track};
 }
 
-int cppshim_audio_encoded_send_aac(
+int cppshim_audio_encoded_send(
     cppshim_audio_pub* p,
     const uint8_t* buf,
     uint32_t len,
+    int codec,
     int sample_rate,
     int samples_per_channel,
     int channels) {
     if (!p || !p->sender || !buf || len == 0) return -1;
 
-    // Match the SDK sample's sample_send_aac fields exactly. Do not touch
-    // advancedSettings (defaults: speech=true, sendEvenIfEmpty=true).
+    // Match the SDK samples (sample_send_aac / sample_send_opus) exactly.
+    // Do not touch advancedSettings (defaults: speech=true,
+    // sendEvenIfEmpty=true).
     ar::EncodedAudioFrameInfo info;
-    info.codec = ar::AUDIO_CODEC_AACLC;
+    info.codec = static_cast<ar::AUDIO_CODEC_TYPE>(codec);
     info.sampleRateHz = sample_rate;
     info.samplesPerChannel = samples_per_channel;
     info.numberOfChannels = channels;

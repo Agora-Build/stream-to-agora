@@ -103,6 +103,7 @@ fail_run() {
 
 echo "─── Local file ───"
 run local-encoded       tests/fixtures/loop-3s.mp4
+run local-hevc-opus     tests/fixtures/hevc-opus-5s.mp4
 run local-audio-only    tests/fixtures/loop-3s.mp4 --audio-only
 run local-video-only    tests/fixtures/loop-3s.mp4 --video-only
 run local-loop          tests/fixtures/loop-3s.mp4 --loop

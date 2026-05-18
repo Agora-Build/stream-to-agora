@@ -12,9 +12,23 @@ use super::error::{check, AgoraError};
 use super::shim;
 use super::sys;
 
+/// AUDIO_CODEC_TYPE ints from the SDK's AgoraBase.h.
+const AUDIO_CODEC_OPUS: i32 = 1;
+const AUDIO_CODEC_AACLC: i32 = 8;
+
+/// Map ffprobe's codec name to the shim's AUDIO_CODEC_TYPE int.
+fn audio_codec(codec_name: &str) -> i32 {
+    match codec_name {
+        "opus" => AUDIO_CODEC_OPUS,
+        _ => AUDIO_CODEC_AACLC, // aac
+    }
+}
+
 pub struct EncodedAudioPublisher {
     shim: *mut shim::cppshim_audio_pub,
     conn: *mut c_void,
+    /// AUDIO_CODEC_TYPE int forwarded per-frame (8 → AAC-LC, 1 → Opus).
+    codec: i32,
 }
 
 // SAFETY: the shim pointer is opaque and never aliased across threads
@@ -33,12 +47,14 @@ pub(super) fn create_encoded(
     svc: *mut c_void,
     conn: *mut c_void,
     factory: *mut c_void,
+    codec_name: &str,
 ) -> Result<EncodedAudioPublisher, AgoraError> {
-    let p = unsafe { shim::cppshim_audio_encoded_create(svc, factory) };
+    let codec = audio_codec(codec_name);
+    let p = unsafe { shim::cppshim_audio_encoded_create(svc, factory, codec) };
     if p.is_null() {
         return Err(AgoraError::null("cppshim_audio_encoded_create"));
     }
-    Ok(EncodedAudioPublisher { shim: p, conn })
+    Ok(EncodedAudioPublisher { shim: p, conn, codec })
 }
 
 pub(super) fn create_raw(
@@ -74,9 +90,9 @@ pub(super) fn create_raw(
 }
 
 impl EncodedAudioPublisher {
-    /// Push one AAC frame. `frame` is the ADTS-framed AAC bytes from the
-    /// caller's parser.
-    pub fn push_aac(
+    /// Push one encoded audio frame — an ADTS-framed AAC frame or a bare
+    /// Opus packet, per the codec this publisher was created for.
+    pub fn push_audio(
         &self,
         frame: &[u8],
         sample_rate: u32,
@@ -84,16 +100,17 @@ impl EncodedAudioPublisher {
         channels: u32,
     ) -> Result<(), AgoraError> {
         let rc = unsafe {
-            shim::cppshim_audio_encoded_send_aac(
+            shim::cppshim_audio_encoded_send(
                 self.shim,
                 frame.as_ptr(),
                 frame.len() as u32,
+                self.codec,
                 sample_rate as i32,
                 samples_per_channel as i32,
                 channels as i32,
             )
         };
-        check(rc, "cppshim_audio_encoded_send_aac")
+        check(rc, "cppshim_audio_encoded_send")
     }
 
     pub fn publish(&self) -> Result<(), AgoraError> {

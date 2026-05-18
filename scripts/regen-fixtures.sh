@@ -9,7 +9,7 @@
 # Usage: scripts/regen-fixtures.sh           # rebuild all
 #        scripts/regen-fixtures.sh loop-3s   # rebuild just one (basename)
 #
-# Required: ffmpeg with libx264 + aac + lavfi.
+# Required: ffmpeg with libx264 + libx265 + aac + libopus + lavfi.
 # Network: needed for `bbb-30s` and `sintel-15s` (Blender open movies).
 
 set -euo pipefail
@@ -73,7 +73,18 @@ regen_sintel_15s() {
       sintel-15s.mp4
 }
 
-ALL="loop-3s motion-pattern-5s smptebars-30fps-stereo-5s bbb-30s sintel-15s"
+regen_hevc_opus_5s() {
+    echo "→ hevc-opus-5s.mp4 (H.265 + Opus encoded-passthrough fixture)"
+    ffmpeg -hide_banner -loglevel error -y \
+      -f lavfi -i "testsrc=duration=5:size=320x240:rate=15" \
+      -f lavfi -i "sine=frequency=440:duration=5" \
+      -c:v libx265 -preset medium -pix_fmt yuv420p -tag:v hvc1 \
+      -x265-params "log-level=error:keyint=15:min-keyint=15" \
+      -c:a libopus -ar 48000 -ac 1 -b:a 64k -shortest \
+      hevc-opus-5s.mp4
+}
+
+ALL="loop-3s motion-pattern-5s smptebars-30fps-stereo-5s bbb-30s sintel-15s hevc-opus-5s"
 
 if [ $# -eq 0 ]; then
     for f in $ALL; do

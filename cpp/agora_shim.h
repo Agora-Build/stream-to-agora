@@ -48,14 +48,16 @@ cppshim_video_pub* cppshim_video_encoded_create(
     int codec_type);
 
 // Push one encoded video access unit. `is_keyframe` selects KEY (3) or
-// DELTA (4) frame type. `fps` populates `framesPerSecond`. Returns 0 on
-// success, non-zero on SDK rejection.
+// DELTA (4) frame type. `fps` populates `framesPerSecond`. `codec_type`
+// is the VIDEO_CODEC_TYPE int (H264=2, H265=3); 0 means H264. Returns 0
+// on success, non-zero on SDK rejection.
 int cppshim_video_encoded_send(
     cppshim_video_pub* p,
     const uint8_t* buf,
     uint32_t len,
     int is_keyframe,
     int fps,
+    int codec_type,
     int64_t capture_time_ms);
 
 // Publish / unpublish the wrapped track on the given connection. The
@@ -69,20 +71,26 @@ void cppshim_video_encoded_destroy(cppshim_video_pub* p);
 
 // --- Audio ---
 
-// Create an encoded-audio publisher (AAC sender + custom track).
+// Create an encoded-audio publisher (sender + custom track). `codec` is
+// the AUDIO_CODEC_TYPE int (AACLC=8, OPUS=1). The track mix mode follows
+// the SDK samples: MIX_ENABLED for AAC, MIX_DISABLED for Opus.
 cppshim_audio_pub* cppshim_audio_encoded_create(
     void* c_service_handle,
-    void* c_factory_handle);
+    void* c_factory_handle,
+    int codec);
 
-// Push one AAC frame (raw AAC bytes — typically an ADTS frame, but the
-// SDK derives codec config from the bitstream itself).
+// Push one encoded audio frame (raw codec bytes — an ADTS frame for AAC,
+// a bare Opus packet for Opus; the SDK derives config from the
+// bitstream + the fields below). `codec` is the AUDIO_CODEC_TYPE int.
 //
-// `samples_per_channel` is 1024 for AAC-LC (the SDK uses this to advance
-// its internal timestamp); pass 0 to let the SDK compute it.
-int cppshim_audio_encoded_send_aac(
+// `samples_per_channel` is 1024 for AAC-LC / the Opus packet's sample
+// count (the SDK uses this to advance its internal timestamp); pass 0 to
+// let the SDK compute it.
+int cppshim_audio_encoded_send(
     cppshim_audio_pub* p,
     const uint8_t* buf,
     uint32_t len,
+    int codec,
     int sample_rate,
     int samples_per_channel,
     int channels);
