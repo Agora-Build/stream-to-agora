@@ -49,6 +49,7 @@ unsafe extern "C" {
         len: u32,
         is_keyframe: i32,
         fps: i32,
+        codec_type: i32,
         capture_time_ms: i64,
     ) -> i32;
     pub fn cppshim_video_encoded_publish(p: *mut cppshim_video_pub, c_conn_handle: *mut c_void) -> i32;
@@ -58,11 +59,13 @@ unsafe extern "C" {
     pub fn cppshim_audio_encoded_create(
         c_service_handle: *mut c_void,
         c_factory_handle: *mut c_void,
+        codec: i32,
     ) -> *mut cppshim_audio_pub;
-    pub fn cppshim_audio_encoded_send_aac(
+    pub fn cppshim_audio_encoded_send(
         p: *mut cppshim_audio_pub,
         buf: *const u8,
         len: u32,
+        codec: i32,
         sample_rate: i32,
         samples_per_channel: i32,
         channels: i32,

@@ -344,16 +344,16 @@ impl Session {
     /// Create a publisher for the chosen codec mode. The returned
     /// AudioPublisher owns the underlying SDK sender + track handles.
     /// Wired in Task 11; per-mode publishers come from Tasks 9–10.
-    pub fn create_audio_publisher(&self, mode: super::publisher::CodecMode)
+    pub fn create_audio_publisher(&self, mode: super::publisher::CodecMode, codec_name: &str)
         -> Result<super::publisher::AudioPublisher, AgoraError>
     {
-        super::publisher::create_audio(self.svc, self.conn, self.factory, mode)
+        super::publisher::create_audio(self.svc, self.conn, self.factory, mode, codec_name)
     }
 
-    pub fn create_video_publisher(&self, mode: super::publisher::CodecMode)
+    pub fn create_video_publisher(&self, mode: super::publisher::CodecMode, codec_name: &str)
         -> Result<super::publisher::VideoPublisher, AgoraError>
     {
-        super::publisher::create_video(self.svc, self.conn, self.factory, mode)
+        super::publisher::create_video(self.svc, self.conn, self.factory, mode, codec_name)
     }
 
     /// Block on the event channel until Shutdown (Ok) or a fatal event

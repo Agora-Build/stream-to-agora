@@ -103,6 +103,7 @@ fail_run() {
 
 echo "─── Local file ───"
 run local-encoded       tests/fixtures/loop-3s.mp4
+run local-hevc-opus     tests/fixtures/hevc-opus-5s.mp4
 run local-audio-only    tests/fixtures/loop-3s.mp4 --audio-only
 run local-video-only    tests/fixtures/loop-3s.mp4 --video-only
 run local-loop          tests/fixtures/loop-3s.mp4 --loop
@@ -113,6 +114,12 @@ run https-mp4-both      https://media.w3.org/2010/05/sintel/trailer.mp4
 run https-mp4-audio     https://media.w3.org/2010/05/sintel/trailer.mp4 --audio-only
 run https-mp4-video     https://media.w3.org/2010/05/sintel/trailer.mp4 --video-only
 run https-mp4-h264only  https://test-videos.co.uk/vids/bigbuckbunny/mp4/h264/360/Big_Buck_Bunny_360_10s_1MB.mp4 --video-only
+# 4K HEVC Main-profile, 25 fps, video-only — exercises the H.265
+# encoded-passthrough path (parse::hevc, -f hevc) from a remote URL.
+run https-hevc-4k       https://lf-tk-sg.ibytedtos.com/obj/tcs-client-sg/resources/hevc_4k25P_main_1.mp4 --video-only
+# 4K HEVC Main-10 (10-bit) + AAC-LC stereo — HEVC video AND AAC audio
+# encoded-passthrough together, with real sound, from a remote URL.
+run https-hevc-4k-aac   https://lf-tk-sg.ibytedtos.com/obj/tcs-client-sg/resources/hevc_4k24P_main10_1.mp4
 
 echo ""
 echo "─── HTTPS HLS ───"

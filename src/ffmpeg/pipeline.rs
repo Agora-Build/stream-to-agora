@@ -118,8 +118,9 @@ pub struct Pipeline {
 impl Pipeline {
     /// Spawn ffmpeg(s) appropriate to the chosen `CodecMode`.
     ///
-    /// Encoded mode: `-c copy` for both streams, output formats `h264`
-    /// (Annex-B) for video and `adts` (AAC ADTS) for audio.
+    /// Encoded mode: `-c copy` for both streams; output muxer follows the
+    /// codec — `h264`/`hevc` (Annex-B) for video, `adts` (AAC) / `ogg`
+    /// (Opus) for audio.
     ///
     /// Raw mode: video → `-pix_fmt yuv420p -f rawvideo`; audio →
     /// `-acodec pcm_s16le -ar 48000 -ac <input_channel_count> -f s16le`.
@@ -131,8 +132,8 @@ impl Pipeline {
         kind: InputKindLite,
         opts: &PipelineOpts,
     ) -> Result<Self> {
-        let video = info.video.as_ref().map(|_v| -> Result<PipelineStream> {
-            let output_args = video_args(mode);
+        let video = info.video.as_ref().map(|v| -> Result<PipelineStream> {
+            let output_args = video_args(mode, &v.codec_name);
             let child = spawn_one(ffmpeg_bin, input, kind, opts, &output_args)?;
             Ok(PipelineStream {
                 child,
@@ -143,7 +144,7 @@ impl Pipeline {
         }).transpose()?;
         let audio = info.audio.as_ref().map(|a| -> Result<PipelineStream> {
             let ac = a.channels.unwrap_or(2).max(1);
-            let output_args = audio_args(mode, ac);
+            let output_args = audio_args(mode, ac, &a.codec_name);
             let child = spawn_one(ffmpeg_bin, input, kind, opts, &output_args)?;
             Ok(PipelineStream {
                 child,
@@ -163,20 +164,23 @@ impl Pipeline {
     }
 }
 
-fn video_args(mode: CodecMode) -> Vec<String> {
+fn video_args(mode: CodecMode, codec_name: &str) -> Vec<String> {
     match mode {
-        CodecMode::Encoded => vec![
-            "-map".into(), "0:v:0".into(),
-            "-c:v".into(), "copy".into(),
-            "-an".into(),
-            // `-f h264` auto-applies the h264_mp4toannexb BSF which
-            // inserts SPS+PPS into the bitstream at file start. No
-            // extra BSF — dump_extra=freq=keyframe rejects mp4-sourced
-            // copy streams with "Invalid data found" and yields an
-            // empty pipe.
-            "-f".into(), "h264".into(),
-            "pipe:1".into(),
-        ],
+        CodecMode::Encoded => {
+            // `-f h264`/`-f hevc` auto-apply the *_mp4toannexb BSF which
+            // inserts the parameter sets into the bitstream at file
+            // start. No extra BSF — dump_extra=freq=keyframe rejects
+            // mp4-sourced copy streams with "Invalid data found" and
+            // yields an empty pipe.
+            let muxer = if codec_name == "hevc" { "hevc" } else { "h264" };
+            vec![
+                "-map".into(), "0:v:0".into(),
+                "-c:v".into(), "copy".into(),
+                "-an".into(),
+                "-f".into(), muxer.into(),
+                "pipe:1".into(),
+            ]
+        }
         CodecMode::Raw => vec![
             "-map".into(), "0:v:0".into(),
             "-an".into(),
@@ -187,15 +191,21 @@ fn video_args(mode: CodecMode) -> Vec<String> {
     }
 }
 
-fn audio_args(mode: CodecMode, channels: u32) -> Vec<String> {
+fn audio_args(mode: CodecMode, channels: u32, codec_name: &str) -> Vec<String> {
     match mode {
-        CodecMode::Encoded => vec![
-            "-map".into(), "0:a:0".into(),
-            "-c:a".into(), "copy".into(),
-            "-vn".into(),
-            "-f".into(), "adts".into(),
-            "pipe:1".into(),
-        ],
+        CodecMode::Encoded => {
+            // AAC → ADTS elementary stream; Opus → Ogg (the only ffmpeg
+            // muxer that frames bare Opus packets — de-Ogg'd by
+            // parse::opus).
+            let muxer = if codec_name == "opus" { "ogg" } else { "adts" };
+            vec![
+                "-map".into(), "0:a:0".into(),
+                "-c:a".into(), "copy".into(),
+                "-vn".into(),
+                "-f".into(), muxer.into(),
+                "pipe:1".into(),
+            ]
+        }
         CodecMode::Raw => vec![
             "-map".into(), "0:a:0".into(),
             "-vn".into(),
@@ -336,5 +346,33 @@ mod tests {
             filled += n;
         }
         assert_eq!(filled, need, "expected one full yuv420p {w}x{h} frame");
+    }
+
+    fn has_pair(a: &[String], k: &str, v: &str) -> bool {
+        a.windows(2).any(|w| w[0] == k && w[1] == v)
+    }
+
+    #[test]
+    fn encoded_video_muxer_follows_codec() {
+        assert!(has_pair(&video_args(CodecMode::Encoded, "h264"), "-f", "h264"));
+        assert!(has_pair(&video_args(CodecMode::Encoded, "hevc"), "-f", "hevc"));
+        // Unknown / other codecs still take the h264 muxer (decide() only
+        // routes h264/hevc here anyway).
+        assert!(has_pair(&video_args(CodecMode::Encoded, "vp9"), "-f", "h264"));
+        // Raw is codec-independent.
+        assert!(has_pair(&video_args(CodecMode::Raw, "hevc"), "-f", "rawvideo"));
+        assert!(video_args(CodecMode::Encoded, "h264")
+            .windows(2)
+            .any(|w| w == ["-c:v", "copy"]));
+    }
+
+    #[test]
+    fn encoded_audio_muxer_follows_codec() {
+        assert!(has_pair(&audio_args(CodecMode::Encoded, 2, "aac"), "-f", "adts"));
+        assert!(has_pair(&audio_args(CodecMode::Encoded, 1, "opus"), "-f", "ogg"));
+        assert!(has_pair(&audio_args(CodecMode::Raw, 2, "opus"), "-f", "s16le"));
+        assert!(audio_args(CodecMode::Encoded, 2, "opus")
+            .windows(2)
+            .any(|w| w == ["-c:a", "copy"]));
     }
 }

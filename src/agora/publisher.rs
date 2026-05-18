@@ -22,20 +22,18 @@ pub enum CodecMode {
 /// `agora_video_encoded_image_sender_send` **AND** for which our current
 /// ffmpeg pipeline output format (`-f h264`, Annex-B) is correct.
 ///
-/// Phase 2 ships with H.264 only on the encoded path. Other codecs Agora's
-/// encoded sender technically supports (H.265/VP8/VP9/AV1/mjpeg) need
-/// codec-specific ffmpeg muxers (-f hevc / -f ivf / -f ogg / -f mjpeg …)
-/// and matching `encoded_video_frame_info.codec_type` values; that's a
-/// Phase 3 expansion. Sending VP9 bytes wrapped in an H.264 muxer just
-/// makes ffmpeg error out and emit zero bytes — silent failure.
-const VIDEO_ENCODED_OK: &[&str] = &["h264"];
+/// Passthrough video codecs: H.264 (`-f h264`) and H.265/HEVC
+/// (`-f hevc`), both Annex-B, parsed by `parse::h264` / `parse::hevc`.
+/// Anything else (VP8/VP9/AV1/mjpeg/MPEG-2/…) falls through to the Raw
+/// path and is decoded → yuv420p, which works for every codec ffmpeg can
+/// decode.
+const VIDEO_ENCODED_OK: &[&str] = &["h264", "hevc"];
 
-/// Audio codec names for the encoded path. Same restriction as video:
-/// Phase 2's pipeline writes `-f adts`, which only accepts AAC. Everything
-/// else (Opus / PCMA / PCMU / G.722) falls through to the Raw path and
-/// gets decoded → s16le → pushed via `agora_audio_pcm_data_sender_send`,
-/// which works for every codec ffmpeg can decode.
-const AUDIO_ENCODED_OK: &[&str] = &["aac"];
+/// Passthrough audio codecs: AAC (`-f adts`) and Opus (`-f ogg`, then
+/// de-Ogg'd by `parse::opus`). Everything else (PCMA/PCMU/G.722/MP3/…)
+/// falls through to the Raw path and is decoded → s16le, which works for
+/// every codec ffmpeg can decode.
+const AUDIO_ENCODED_OK: &[&str] = &["aac", "opus"];
 
 /// Pure mode-decision. Encoded if *both* present streams use accepted
 /// codecs; otherwise Raw. A video-only or audio-only input takes only
@@ -111,22 +109,38 @@ impl VideoPublisher {
 }
 
 /// Dispatch helper invoked from `Session::create_audio_publisher`.
-pub(super) fn create_audio(svc: *mut c_void, conn: *mut c_void, factory: *mut c_void, mode: CodecMode)
-    -> Result<AudioPublisher, AgoraError>
-{
+/// `codec_name` is ffprobe's audio codec id (e.g. "aac", "opus"); used
+/// only on the Encoded path.
+pub(super) fn create_audio(
+    svc: *mut c_void,
+    conn: *mut c_void,
+    factory: *mut c_void,
+    mode: CodecMode,
+    codec_name: &str,
+) -> Result<AudioPublisher, AgoraError> {
     match mode {
-        CodecMode::Encoded => create_audio_encoded(svc, conn, factory).map(AudioPublisher::Encoded),
-        CodecMode::Raw     => create_audio_raw(svc, conn, factory).map(AudioPublisher::Raw),
+        CodecMode::Encoded => {
+            create_audio_encoded(svc, conn, factory, codec_name).map(AudioPublisher::Encoded)
+        }
+        CodecMode::Raw => create_audio_raw(svc, conn, factory).map(AudioPublisher::Raw),
     }
 }
 
 /// Dispatch helper invoked from `Session::create_video_publisher`.
-pub(super) fn create_video(svc: *mut c_void, conn: *mut c_void, factory: *mut c_void, mode: CodecMode)
-    -> Result<VideoPublisher, AgoraError>
-{
+/// `codec_name` is ffprobe's video codec id (e.g. "h264", "hevc"); used
+/// only on the Encoded path.
+pub(super) fn create_video(
+    svc: *mut c_void,
+    conn: *mut c_void,
+    factory: *mut c_void,
+    mode: CodecMode,
+    codec_name: &str,
+) -> Result<VideoPublisher, AgoraError> {
     match mode {
-        CodecMode::Encoded => create_video_encoded(svc, conn, factory).map(VideoPublisher::Encoded),
-        CodecMode::Raw     => create_video_raw(svc, conn, factory).map(VideoPublisher::Raw),
+        CodecMode::Encoded => {
+            create_video_encoded(svc, conn, factory, codec_name).map(VideoPublisher::Encoded)
+        }
+        CodecMode::Raw => create_video_raw(svc, conn, factory).map(VideoPublisher::Raw),
     }
 }
 
@@ -138,6 +152,7 @@ mod tests {
     const H264_AAC: &[u8] = include_bytes!("../../tests/fixtures/probe-h264-aac.json");
     const VP9_OPUS: &[u8] = include_bytes!("../../tests/fixtures/probe-vp9-opus.json");
     const MPEG2_MP3: &[u8] = include_bytes!("../../tests/fixtures/probe-mpeg2-mp3.json");
+    const HEVC_OPUS: &[u8] = include_bytes!("../../tests/fixtures/probe-hevc-opus.json");
 
     fn info(json: &[u8]) -> MediaInfo {
         parse_probe_json(json).unwrap()
@@ -165,5 +180,39 @@ mod tests {
         let mut i = info(H264_AAC);
         i.audio.as_mut().unwrap().codec_name = "flac".into();
         assert_eq!(decide(&i), CodecMode::Raw);
+    }
+
+    #[test]
+    fn hevc_and_opus_combinations_pick_encoded() {
+        // h264+opus, hevc+aac, hevc+opus all pass the widened allowlists.
+        for (v, a) in [("h264", "opus"), ("hevc", "aac"), ("hevc", "opus")] {
+            let mut i = info(H264_AAC);
+            i.video.as_mut().unwrap().codec_name = v.into();
+            i.audio.as_mut().unwrap().codec_name = a.into();
+            assert_eq!(decide(&i), CodecMode::Encoded, "{v}+{a} should be Encoded");
+        }
+    }
+
+    #[test]
+    fn hevc_video_only_picks_encoded() {
+        let mut i = info(H264_AAC);
+        i.video.as_mut().unwrap().codec_name = "hevc".into();
+        i.audio = None;
+        assert_eq!(decide(&i), CodecMode::Encoded);
+    }
+
+    #[test]
+    fn vp9_with_opus_still_raw_because_video_unsupported() {
+        // Opus is now allowed, but VP9 is not → still Raw.
+        assert_eq!(decide(&info(VP9_OPUS)), CodecMode::Raw);
+    }
+
+    #[test]
+    fn real_hevc_opus_fixture_probe_picks_encoded() {
+        // Parsed from the actual ffprobe JSON of tests/fixtures/hevc-opus-5s.mp4.
+        let i = info(HEVC_OPUS);
+        assert_eq!(i.video.as_ref().unwrap().codec_name, "hevc");
+        assert_eq!(i.audio.as_ref().unwrap().codec_name, "opus");
+        assert_eq!(decide(&i), CodecMode::Encoded);
     }
 }
