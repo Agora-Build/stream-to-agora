@@ -51,7 +51,12 @@ pub(super) fn create_encoded(
     conn: *mut c_void,
     factory: *mut c_void,
 ) -> Result<EncodedVideoPublisher, AgoraError> {
-    let p = unsafe { shim::cppshim_video_encoded_create(svc, factory, VIDEO_CODEC_H264) };
+    // codec_type=0 → shim leaves SenderOptions at C++ defaults and only
+    // sets ccMode, EXACTLY matching the SDK sample (which proves this
+    // config works with H.264 bytes — per-frame EncodedVideoFrameInfo
+    // .codecType=H264 is what actually routes them).
+    let _ = VIDEO_CODEC_H264;
+    let p = unsafe { shim::cppshim_video_encoded_create(svc, factory, 0) };
     if p.is_null() {
         return Err(AgoraError::null("cppshim_video_encoded_create"));
     }
@@ -110,14 +115,14 @@ impl EncodedVideoPublisher {
         self.fps_den = fps_den.max(1);
     }
 
-    /// Push one Annex-B-framed H.264 access-unit. `_capture_time_ms` is
-    /// accepted for symmetry with the raw path but not forwarded — the
-    /// C++ shim derives timing from `frames_per_second`.
+    /// Push one Annex-B-framed H.264 access-unit. `capture_time_ms` is
+    /// the monotonic ms timestamp the SDK uses to order + pace frames
+    /// at the subscriber.
     pub fn push_h264(
         &self,
         au: &[u8],
         is_keyframe: bool,
-        _capture_time_ms: i64,
+        capture_time_ms: i64,
     ) -> Result<(), AgoraError> {
         let fps = (self.fps_num as i32) / (self.fps_den as i32).max(1);
         let rc = unsafe {
@@ -127,6 +132,7 @@ impl EncodedVideoPublisher {
                 au.len() as u32,
                 if is_keyframe { 1 } else { 0 },
                 fps.max(1),
+                capture_time_ms,
             )
         };
         check(rc, "cppshim_video_encoded_send")

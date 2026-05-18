@@ -16,3 +16,8 @@ common_resource/
 # Brainstorming / planning artifacts produced by the superpowers skills.
 # Kept local for the design+plan workflow; not shipped to the repo.
 docs/superpowers/
+
+# Browser-side WebRTC debugging dumps (may contain channel identifiers).
+*_dump.gz
+rtcstats_dump.gz
+webrtc_internals_dump.gz

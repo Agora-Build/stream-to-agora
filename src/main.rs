@@ -166,6 +166,11 @@ async fn main() -> Result<()> {
         (None, None)
     };
 
+    // connect() kicks off the async connection but does NOT wait — we
+    // publish tracks first, then `wait_connected()`. This mirrors the
+    // SDK sample's order so video tracks join the initial SDP offer
+    // instead of forcing a post-connect renegotiation (which breaks
+    // encoded-video RTP packetization while audio survives).
     let mut session = agora::Session::connect(&cfg).await?;
 
     // Wire the renew task's sender into the observer (P3-T4's RENEW_TX).
@@ -174,11 +179,6 @@ async fn main() -> Result<()> {
     if let Some(rtx) = renew_tx {
         session.set_renew_sender(rtx);
     }
-
-    println!("ready");
-    eprintln!("  channel:   {}", cli.channel);
-    eprintln!("  rtc user:  {}", cli.rtc_user_id);
-    eprintln!("  conn id:   {}", session.conn_id);
 
     // ── Probe input, decide encoded vs raw, spawn ffmpeg pipeline ─────
     let ffmpeg_bin = std::path::PathBuf::from(&cli.ffmpeg_path);
@@ -224,11 +224,21 @@ async fn main() -> Result<()> {
         }
     }
 
-    // ── Publish ───────────────────────────────────────────────────────
+    // ── Publish (BEFORE wait_connected — see connect() ordering note) ──
+    if let Some(ap) = audio_pub_opt.as_ref() { ap.publish()?; }
     if let Some(vp) = video_pub_opt.as_ref() {
         vp.publish()?;
     }
-    if let Some(ap) = audio_pub_opt.as_ref() { ap.publish()?; }
+
+    // ── Now block until the channel connection is established ──────────
+    session
+        .wait_connected(std::time::Duration::from_secs(cli.connect_timeout))
+        .await?;
+
+    println!("ready");
+    eprintln!("  channel:   {}", cli.channel);
+    eprintln!("  rtc user:  {}", cli.rtc_user_id);
+    eprintln!("  conn id:   {}", session.conn_id);
 
     // ── Spawn ffmpeg + frame pumps ────────────────────────────────────
     let kind_lite = match classify_input(&cli.input) {
@@ -264,12 +274,28 @@ async fn main() -> Result<()> {
     let audio_tx = session.sender();
     let audio_channels = info.audio.as_ref().and_then(|a| a.channels).unwrap_or(2).max(1);
 
+    // Video-thread handle: the encoded-video pump runs on a dedicated OS
+    // thread (not a tokio worker) so every sendEncodedVideoImage call
+    // happens on one fixed thread, never hopping across .await points.
+    // The SDK's encoded-video RTP path appears to require this (the C++
+    // sample sends from a plain std::thread); audio tolerates thread
+    // hopping, video doesn't.
+    let mut video_os_thread: Option<std::thread::JoinHandle<()>> = None;
     if let Some(vp) = video_pub_opt.take() {
         if let Some(vs) = video_stream {
             match vp {
                 agora::VideoPublisher::Encoded(vp) => {
-                    let jh = tokio::spawn(pump_h264(vp, vs, cancel.clone(), session_start, fps_n, fps_d, cli.reconnect_attempts, video_tx.clone()));
-                    session.register_pump(jh).await;
+                    let c = cancel.clone();
+                    let tx = video_tx.clone();
+                    let ra = cli.reconnect_attempts;
+                    video_os_thread = Some(std::thread::Builder::new()
+                        .name("video-pump".into())
+                        .spawn(move || {
+                            let rt = tokio::runtime::Builder::new_current_thread()
+                                .enable_all().build().expect("video-pump runtime");
+                            rt.block_on(pump_h264(vp, vs, c, session_start, fps_n, fps_d, ra, tx));
+                        })
+                        .expect("spawn video-pump thread"));
                 }
                 agora::VideoPublisher::Raw(vp) => {
                     let jh = tokio::spawn(pump_yuv(vp, vs, cancel.clone(), session_start, fps_n, fps_d, w, h, cli.reconnect_attempts, video_tx.clone()));
@@ -282,7 +308,7 @@ async fn main() -> Result<()> {
         if let Some(as_) = audio_stream {
             match ap {
                 agora::AudioPublisher::Encoded(ap) => {
-                    let jh = tokio::spawn(pump_aac(ap, as_, cancel.clone(), cli.reconnect_attempts, audio_tx.clone()));
+                    let jh = tokio::spawn(pump_aac(ap, as_, cancel.clone(), session_start, cli.reconnect_attempts, audio_tx.clone()));
                     session.register_pump(jh).await;
                 }
                 agora::AudioPublisher::Raw(ap) => {
@@ -363,6 +389,12 @@ async fn main() -> Result<()> {
     }
 
     session.run().await?;      // returns Ok on Shutdown, Err on a fatal conn event
+    // Join the dedicated video-pump OS thread BEFORE Session teardown so
+    // the encoded publisher (owned by the thread) drops while `conn` is
+    // still alive — same UAF-avoidance as Session's tokio pump join.
+    if let Some(t) = video_os_thread.take() {
+        let _ = t.join();
+    }
     eprintln!("disconnected.");
     drop(session);             // explicit: triggers clean SDK teardown
     Ok(())
@@ -551,12 +583,14 @@ async fn pump_aac(
     p: agora::audio::EncodedAudioPublisher,
     mut stream: ffmpeg::pipeline::PipelineStream,
     cancel: std::sync::Arc<agora::CancelToken>,
+    session_start: std::time::Instant,
     reconnect_attempts: u32,
     tx: tokio::sync::mpsc::UnboundedSender<agora::ConnEvent>,
 ) {
     use tokio::io::AsyncReadExt;
     let mut buf = Vec::with_capacity(64 * 1024);
     let mut tmp = vec![0u8; 8 * 1024];
+    let mut frame_idx: u64 = 0;
     let mut consecutive_failures: u32 = 0;
     let mut last_respawn_at: Option<std::time::Instant> = None;
     let mut pushed_since_last_respawn: bool = true;
@@ -624,12 +658,20 @@ async fn pump_aac(
                     let sr = f.sample_rate;
                     let spc = f.samples_per_channel;
                     let ch = f.channels;
+                    // Pace audio so we don't shovel the whole file's worth
+                    // of AAC frames at the SDK in milliseconds. Each frame
+                    // = samples_per_channel/sample_rate seconds of audio.
+                    let target = session_start + std::time::Duration::from_micros(
+                        frame_idx * 1_000_000 * spc as u64 / sr.max(1) as u64,
+                    );
+                    tokio::time::sleep_until(tokio::time::Instant::from_std(target)).await;
                     if let Err(e) = p.push_aac(&buf[..len], sr, spc, ch) {
                         let _ = tx.send(agora::ConnEvent::Failed {
                             code: e.code.unwrap_or(0), msg: e.to_string(),
                         });
                         return;
                     }
+                    frame_idx += 1;
                     pushed_since_last_respawn = true;
                     if let Some(t) = last_respawn_at {
                         if t.elapsed() >= std::time::Duration::from_secs(2) {

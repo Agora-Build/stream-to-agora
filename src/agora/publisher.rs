@@ -41,6 +41,16 @@ const AUDIO_ENCODED_OK: &[&str] = &["aac"];
 /// codecs; otherwise Raw. A video-only or audio-only input takes only
 /// the present stream's verdict.
 pub fn decide(info: &MediaInfo) -> CodecMode {
+    // Escape hatch: `STA_FORCE_MODE=raw|encoded` overrides the codec-based
+    // decision. Useful for forcing the decode→raw path on an H.264/AAC
+    // source (e.g. to sidestep a multi-slice bitstream) without re-encoding.
+    if let Ok(s) = std::env::var("STA_FORCE_MODE") {
+        match s.to_ascii_lowercase().as_str() {
+            "raw" => return CodecMode::Raw,
+            "encoded" => return CodecMode::Encoded,
+            _ => {}
+        }
+    }
     let video_ok = match &info.video {
         Some(v) => VIDEO_ENCODED_OK.contains(&v.codec_name.as_str()),
         None => true, // no video — neutral

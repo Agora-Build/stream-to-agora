@@ -23,8 +23,21 @@ pub struct cppshim_video_pub {
 pub struct cppshim_audio_pub {
     _private: [u8; 0],
 }
+#[repr(C)]
+pub struct cppshim_local_user_observer {
+    _private: [u8; 0],
+}
+#[repr(C)]
+pub struct cppshim_conn_observer {
+    _private: [u8; 0],
+}
 
 unsafe extern "C" {
+    pub fn cppshim_local_user_observer_register(c_conn_handle: *mut c_void) -> *mut cppshim_local_user_observer;
+    pub fn cppshim_local_user_observer_destroy(obs: *mut cppshim_local_user_observer);
+    pub fn cppshim_conn_observer_register(c_conn_handle: *mut c_void) -> *mut cppshim_conn_observer;
+    pub fn cppshim_conn_observer_destroy(obs: *mut cppshim_conn_observer);
+
     pub fn cppshim_video_encoded_create(
         c_service_handle: *mut c_void,
         c_factory_handle: *mut c_void,
@@ -36,6 +49,7 @@ unsafe extern "C" {
         len: u32,
         is_keyframe: i32,
         fps: i32,
+        capture_time_ms: i64,
     ) -> i32;
     pub fn cppshim_video_encoded_publish(p: *mut cppshim_video_pub, c_conn_handle: *mut c_void) -> i32;
     pub fn cppshim_video_encoded_unpublish(p: *mut cppshim_video_pub, c_conn_handle: *mut c_void) -> i32;

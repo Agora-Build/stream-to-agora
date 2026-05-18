@@ -12,6 +12,23 @@ extern "C" {
 // Opaque handle types.
 typedef struct cppshim_video_pub cppshim_video_pub;
 typedef struct cppshim_audio_pub cppshim_audio_pub;
+typedef struct cppshim_local_user_observer cppshim_local_user_observer;
+
+// Register a no-op LocalUserObserver on the connection's local user.
+// Required: without this the SDK's RTP packetizer produces fragments
+// that WebRTC subscribers can't reassemble (framesReceived stays 0).
+// Returns an opaque handle that must be passed to
+// cppshim_local_user_observer_destroy when the session tears down (or
+// NULL on failure).
+cppshim_local_user_observer* cppshim_local_user_observer_register(void* c_conn_handle);
+void cppshim_local_user_observer_destroy(cppshim_local_user_observer* obs);
+
+// Register a no-op C++ IRtcConnectionObserver. Registered alongside the
+// flat-C observer Rust uses; required for the video RTCP feedback path
+// (audio works without it, video doesn't). Returns NULL on failure.
+typedef struct cppshim_conn_observer cppshim_conn_observer;
+cppshim_conn_observer* cppshim_conn_observer_register(void* c_conn_handle);
+void cppshim_conn_observer_destroy(cppshim_conn_observer* obs);
 
 // Create an encoded-video publisher (sender + custom track).
 //
@@ -38,7 +55,8 @@ int cppshim_video_encoded_send(
     const uint8_t* buf,
     uint32_t len,
     int is_keyframe,
-    int fps);
+    int fps,
+    int64_t capture_time_ms);
 
 // Publish / unpublish the wrapped track on the given connection. The
 // `c_conn_handle` is the flat-C handle from `agora_rtc_conn_create`.
