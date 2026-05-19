@@ -58,6 +58,8 @@ int cppshim_video_encoded_send(
     int is_keyframe,
     int fps,
     int codec_type,
+    int width,
+    int height,
     int64_t capture_time_ms);
 
 // Publish / unpublish the wrapped track on the given connection. The

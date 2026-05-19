@@ -140,24 +140,29 @@ cppshim_video_pub* cppshim_video_encoded_create(
     auto sender = factory->createVideoEncodedImageSender();
     if (!sender) return nullptr;
 
+    // Match every SDK sample (sample_send_h264_pcm / h265 / ivfvp8):
+    // they set ONLY ccMode=CC_ENABLED on SenderOptions and never touch
+    // SenderOptions.codecType — routing is done by the per-frame
+    // EncodedVideoFrameInfo.codecType + setVideoEncoderConfiguration.
+    // (Setting opts.codecType is a no-op for H.264/H.265 — it equals the
+    // C++ default — but for VP8/VP9/AV1 it diverges from the sample and
+    // stops the track from being published.) CC_ENABLED is also the
+    // default, so this is byte-identical for the proven H.26x paths.
     ar::SenderOptions opts;
-    // C++ defaults: ccMode=CC_ENABLED, codecType=H265, targetBitrate=6500.
-    // The H.264 sample leaves these at default (proven by the v0.2.2
-    // release — callers pass codec_type=0 for H.264 to preserve it); the
-    // per-frame EncodedVideoFrameInfo.codecType is what routes the bytes.
-    if (codec_type != 0) {
-        opts.codecType = static_cast<ar::VIDEO_CODEC_TYPE>(codec_type);
-    }
+    opts.ccMode = ar::TCcMode::CC_ENABLED;
 
     auto track = service->createCustomVideoTrack(sender, opts);
     if (!track) return nullptr;
 
-    // H.265: mirror sample_send_h265 — pin the track's encoder config to
-    // H265 as well. H.264 deliberately skips this (matches the proven
-    // sample_send_h264_pcm, which sets no encoder configuration).
-    if (codec_type == 3) {
+    // Every non-H.264 codec must pin the track's encoder config to its
+    // codec, or the SDK never negotiates/packetizes it and subscribers
+    // get no video. The SDK's own samples confirm this: sample_send_h265
+    // and sample_send_ivfvp8 both call setVideoEncoderConfiguration with
+    // the matching codecType; sample_send_h264_pcm does NOT (H.264 is the
+    // default — codec_type 0 here keeps that proven path untouched).
+    if (codec_type != 0) {
         ar::VideoEncoderConfiguration ec;
-        ec.codecType = ar::VIDEO_CODEC_H265;
+        ec.codecType = static_cast<ar::VIDEO_CODEC_TYPE>(codec_type);
         track->setVideoEncoderConfiguration(ec);
     }
 
@@ -171,6 +176,8 @@ int cppshim_video_encoded_send(
     int is_keyframe,
     int fps,
     int codec_type,
+    int width,
+    int height,
     int64_t capture_time_ms) {
     if (!p || !p->sender || !buf || len == 0) return -1;
 
@@ -184,15 +191,29 @@ int cppshim_video_encoded_send(
     // codec, which is what actually routes the bitstream.
     (void)capture_time_ms;
 
+    // Per-frame info, byte-identical to the matching SDK sample:
+    //  - H.264/H.265 (codec_type 0/3): sample_send_h264_pcm / h265 set
+    //    {rotation, codecType, framesPerSecond, frameType} and derive
+    //    size from the in-band SPS — leave this proven path untouched.
+    //  - VP8/VP9/AV1: sample_send_ivfvp8 sets {rotation, codecType,
+    //    frameType, width, height} and does NOT set framesPerSecond.
+    //    VP8/VP9/AV1 carry no SPS, so without explicit width/height the
+    //    encoded track stays 0x0 and is never published (no remote user).
+    const bool is_h26x = (codec_type == 0 || codec_type == 3);
     ar::EncodedVideoFrameInfo info;
     info.rotation = ar::VIDEO_ORIENTATION_0;
     info.codecType = codec_type
         ? static_cast<ar::VIDEO_CODEC_TYPE>(codec_type)
         : ar::VIDEO_CODEC_H264;
-    info.framesPerSecond = fps;
     info.frameType = is_keyframe
         ? ar::VIDEO_FRAME_TYPE_KEY_FRAME
         : ar::VIDEO_FRAME_TYPE_DELTA_FRAME;
+    if (is_h26x) {
+        info.framesPerSecond = fps;
+    } else if (width > 0 && height > 0) {
+        info.width = width;
+        info.height = height;
+    }
     bool ok = p->sender->sendEncodedVideoImage(buf, len, info);
     return ok ? 0 : 1;
 }

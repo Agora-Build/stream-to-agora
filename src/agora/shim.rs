@@ -50,6 +50,8 @@ unsafe extern "C" {
         is_keyframe: i32,
         fps: i32,
         codec_type: i32,
+        width: i32,
+        height: i32,
         capture_time_ms: i64,
     ) -> i32;
     pub fn cppshim_video_encoded_publish(p: *mut cppshim_video_pub, c_conn_handle: *mut c_void) -> i32;

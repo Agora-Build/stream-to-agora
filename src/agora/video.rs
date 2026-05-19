@@ -148,6 +148,8 @@ impl EncodedVideoPublisher {
                 if is_keyframe { 1 } else { 0 },
                 fps.max(1),
                 self.codec_type,
+                self.width,
+                self.height,
                 capture_time_ms,
             )
         };
