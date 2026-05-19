@@ -6,8 +6,8 @@
 # byte-similar fixtures (libx264 isn't fully deterministic across
 # versions, so byte-exact isn't guaranteed — but stream structure is).
 #
-# Usage: scripts/regen-fixtures.sh           # rebuild all
-#        scripts/regen-fixtures.sh loop-3s   # rebuild just one (basename)
+# Usage: scripts/regen-fixtures.sh                  # rebuild all
+#        scripts/regen-fixtures.sh motion-pattern-5s  # rebuild just one (basename)
 #
 # Required: ffmpeg with libx264 + libx265 + aac + libopus + lavfi.
 # Network: needed for `bbb-30s` and `sintel-15s` (Blender open movies).
@@ -19,17 +19,6 @@ mkdir -p tests/fixtures
 cd tests/fixtures
 
 X264_BASELINE='-c:v libx264 -preset medium -profile:v baseline -level 3.0 -pix_fmt yuv420p'
-
-regen_loop_3s() {
-    echo "→ loop-3s.mp4"
-    ffmpeg -hide_banner -loglevel error -y \
-      -f lavfi -i "testsrc=duration=3:size=320x240:rate=15" \
-      -f lavfi -i "sine=frequency=440:duration=3" \
-      $X264_BASELINE \
-      -x264-params "slices=1" \
-      -c:a aac -ar 48000 -ac 1 -shortest \
-      loop-3s.mp4
-}
 
 regen_motion_pattern_5s() {
     echo "→ motion-pattern-5s.mp4"
@@ -130,7 +119,7 @@ regen_h264_g711u_5s() {
 # unit tests + `decide()` coverage; live-verify with a real HE-AAC
 # source when an fdk-enabled ffmpeg is available.
 
-ALL="loop-3s motion-pattern-5s smptebars-30fps-stereo-5s bbb-30s sintel-15s hevc-opus-5s vp8-opus-5s vp9-opus-5s av1-aac-5s h264-g711u-5s"
+ALL="motion-pattern-5s smptebars-30fps-stereo-5s bbb-30s sintel-15s hevc-opus-5s vp8-opus-5s vp9-opus-5s av1-aac-5s h264-g711u-5s"
 
 if [ $# -eq 0 ]; then
     for f in $ALL; do

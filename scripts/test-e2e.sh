@@ -102,15 +102,15 @@ fail_run() {
 }
 
 echo "─── Local file ───"
-run local-encoded       tests/fixtures/loop-3s.mp4
+run local-encoded       tests/fixtures/motion-pattern-5s.mp4
 run local-hevc-opus     tests/fixtures/hevc-opus-5s.mp4
 run local-vp8-opus      tests/fixtures/vp8-opus-5s.webm
 run local-vp9-opus      tests/fixtures/vp9-opus-5s.webm
 run local-av1-aac       tests/fixtures/av1-aac-5s.mp4
 run local-h264-g711u    tests/fixtures/h264-g711u-5s.mkv
-run local-audio-only    tests/fixtures/loop-3s.mp4 --audio-only
-run local-video-only    tests/fixtures/loop-3s.mp4 --video-only
-run local-loop          tests/fixtures/loop-3s.mp4 --loop
+run local-audio-only    tests/fixtures/motion-pattern-5s.mp4 --audio-only
+run local-video-only    tests/fixtures/motion-pattern-5s.mp4 --video-only
+run local-loop          tests/fixtures/motion-pattern-5s.mp4 --loop
 
 echo ""
 echo "─── HTTPS MP4 ───"
@@ -146,9 +146,9 @@ run https-with-header   https://media.w3.org/2010/05/sintel/trailer.mp4 \
 echo ""
 echo "─── CLI validation (expected fails) ───"
 fail_run bad-scheme                 "ftp://example.com/foo.mp4"
-fail_run bad-header-no-colon        tests/fixtures/loop-3s.mp4 --http-header "no-colon-here"
-fail_run bad-header-crlf            tests/fixtures/loop-3s.mp4 --http-header $'Bad: x\r\nInjected: y'
-fail_run mutually-exclusive         tests/fixtures/loop-3s.mp4 --audio-only --video-only
+fail_run bad-header-no-colon        tests/fixtures/motion-pattern-5s.mp4 --http-header "no-colon-here"
+fail_run bad-header-crlf            tests/fixtures/motion-pattern-5s.mp4 --http-header $'Bad: x\r\nInjected: y'
+fail_run mutually-exclusive         tests/fixtures/motion-pattern-5s.mp4 --audio-only --video-only
 fail_run missing-input              /tmp/this-file-does-not-exist.mp4
 
 echo ""

@@ -254,7 +254,7 @@ mod tests {
     use std::path::PathBuf;
     use tokio::io::AsyncReadExt;
 
-    fn fixture() -> PathBuf { PathBuf::from("tests/fixtures/loop-3s.mp4") }
+    fn fixture() -> PathBuf { PathBuf::from("tests/fixtures/motion-pattern-5s.mp4") }
     fn ffmpeg() -> PathBuf {
         std::env::var_os("FFMPEG")
             .map(PathBuf::from)
