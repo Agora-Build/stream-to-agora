@@ -235,6 +235,43 @@ The env-gated `STA_TRACE=1` shim diagnostic (`shim.vid[N] codec=… WxH
 rc=…`) was retained — it is what localised this bug and pins the
 codec/dimensions actually handed to the SDK.
 
+### VP9 and AV1 encoded passthrough is currently not delivered by the SDK
+
+H.264, H.265 and VP8 encoded passthrough render end-to-end. **VP9 and
+AV1 do not** on RTSA 4.4.32: the SDK accepts every frame
+(`sendEncodedVideoImage` returns true; `STA_TRACE` shows `codec=13`/
+`codec=12`, correct dimensions, `rc=ok`), but no RTP is ever emitted and
+the subscriber never sees the track.
+
+Isolated to the SDK by a controlled diff of decrypted sender logs with
+Agora's own VP8 sample retargeted to VP9/AV1 (only `codecType` differs):
+
+| step | VP8 (control) | VP9/AV1 |
+|------|---------------|---------|
+| `SetVideoEncoderConfigurationInternal codecType` | 1 | 13 / 12 |
+| `GetWebrtcCodecInfo` → webrtc codec | 1 (VP8) | 2 / 3 |
+| `VideoImageSenderImpl::buildVideoEncodeImageData` | per frame | per frame |
+| `rtp_sender_video.cc:1518 Sent first RTP packet` | +1 ms | **never** |
+| `PublishStateManager: PUBLISHING → PUBLISHED` | +7 ms | **never** |
+| steady-state `senderFpsStats` | `sender[15\|15]` | `sender[0\|0]` |
+| 5 s in | publishing | `local video publish timeout 5006` |
+
+Frames enter the encoded-image-sender but never reach `rtp_sender_video::SendVideo` — the
+encoded path has no packetizer entry for VP9/AV1. Agora's own native
+receiver (`sample_receive_yuv_pcm`) confirms: VP8 → 220+ YUV frames
+decoded with `onUserVideoTrackSubscribed codecType 1`; VP9/AV1 → 0
+frames, `onUserVideoTrackSubscribed` never fires. Consistent with the
+SDK header (`IAgoraService.h:765`: encoded custom video track supports
+"such as H.264 or VP8 frames"), no `sample_send_ivfvp9`/`ivfav1` ships,
+and AV1 is tagged `@technical preview`.
+
+VP9 and AV1 are intentionally kept in `VIDEO_ENCODED_OK` so the moment
+Agora wires the packetizers in, both codecs will start rendering with no
+code change here — the publisher side is already correct (byte-exact
+`parse::ivf`, correct `VIDEO_CODEC_TYPE`, correct keyframe flags,
+`rc=ok`). Until then, browser/native subscribers will not see VP9/AV1
+video even though it appears to publish from this tool's perspective.
+
 ## Development
 
 ```bash
