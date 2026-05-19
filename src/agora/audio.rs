@@ -207,3 +207,25 @@ impl Drop for RawAudioPublisher {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Same regression class as `video_codec_type`: these integers are
+    /// the SDK's `AUDIO_CODEC_TYPE` enum (AgoraBase.h) and MUST match it,
+    /// incl. the AAC profile → HE-AAC/HE-AACv2 disambiguation.
+    #[test]
+    fn audio_codec_maps_codec_and_profile() {
+        assert_eq!(audio_codec("aac", None), 8, "AUDIO_CODEC_AACLC");
+        assert_eq!(audio_codec("aac", Some("LC")), 8, "plain AAC-LC profile");
+        assert_eq!(audio_codec("aac", Some("HE-AAC")), 9, "AUDIO_CODEC_HEAAC");
+        assert_eq!(audio_codec("aac", Some("he-aac")), 9, "case-insensitive");
+        assert_eq!(audio_codec("aac", Some("HE-AACv2")), 11, "AUDIO_CODEC_HEAAC2");
+        assert_eq!(audio_codec("aac", Some("HE-AACV2")), 11, "case-insensitive");
+        assert_eq!(audio_codec("opus", None), 1, "AUDIO_CODEC_OPUS");
+        assert_eq!(audio_codec("pcm_mulaw", None), 4, "AUDIO_CODEC_PCMU");
+        assert_eq!(audio_codec("pcm_alaw", None), 3, "AUDIO_CODEC_PCMA");
+        assert_eq!(audio_codec("mp3", None), 8, "unknown → AAC-LC default");
+    }
+}

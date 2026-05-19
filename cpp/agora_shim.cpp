@@ -17,14 +17,20 @@
 // still holds (service / connection / factory) by dereferencing them —
 // see deref_c_handle() below.
 //
-// Bitstream handling: this shim forwards each access unit to
-// sendEncodedVideoImage exactly as produced by parse::h264::next_au —
-// SPS+PPS+IDR grouped into the keyframe AU, leading SEI kept, no
-// captureTimeMs override — byte-for-byte the SDK sample's
-// sendOneH264Frame. (Splitting at the second VCL slice, stripping SEI,
-// or setting captureTimeMs all broke subscriber decode → endless
-// intra-frame requests / black video.) SenderOptions.codecType must
-// match the bitstream (H.264); it's set by the Rust caller.
+// Bitstream handling: the shim forwards each access unit / frame
+// exactly as produced by the upstream parser (parse::h264 / parse::hevc
+// / parse::ivf) — no SEI strip, no captureTimeMs override — byte-for-
+// byte matching the corresponding SDK sample (sample_send_h264_pcm /
+// sample_send_h265 / sample_send_ivfvp8). Per-codec setup, selected by
+// the `codec_type` the Rust caller passes (video::video_codec_type):
+//   - H.264 (codec_type 0): default SenderOptions, no encoder config —
+//     the proven v0.2.2 path.
+//   - H.265/VP8/VP9/AV1 (non-zero): setVideoEncoderConfiguration with
+//     the matching codecType + per-frame info.codecType; VP8/VP9/AV1
+//     also need per-frame info.width/height (no in-band SPS to derive
+//     size from). SenderOptions.codecType is never set (matches every
+//     SDK sample). A wrong/zero codec_type makes the SDK mislabel the
+//     bitstream → subscribers get no decodable video.
 
 #include "agora_shim.h"
 
@@ -37,8 +43,22 @@
 #include "NGIAgoraAudioTrack.h"
 #include "AgoraBase.h"
 
+#include <cstdio>
+#include <cstdlib>
+#include <atomic>
+
 namespace ar = agora::rtc;
 namespace ab = agora::base;
+
+// Env-gated diagnostic (STA_TRACE=1): localises where the encoded-video
+// path breaks for a codec — the codec/dimensions actually handed to the
+// SDK, whether it accepts frames, whether a subscriber negotiates the
+// track (intra requests). Retained: it is what pinned the VP8/VP9/AV1
+// codec-mislabel bug (see README §Known Issues); off unless STA_TRACE set.
+static bool sta_trace() {
+    static bool t = std::getenv("STA_TRACE") != nullptr;
+    return t;
+}
 
 // No-op LocalUserObserver. The SDK sample registers one; without it, the
 // SDK's RTP packetizer doesn't produce frames the WebRTC depacketizer can
@@ -78,7 +98,9 @@ public:
 
     // Subscriber-driven keyframe request (PLI). A future enhancement
     // could signal the pump to emit a fresh IDR on demand.
-    void onIntraRequestReceived() override {}
+    void onIntraRequestReceived() override {
+        if (sta_trace()) std::fprintf(stderr, "shim.intra\n");
+    }
     void onLocalVideoTrackStateChanged(agora::agora_refptr<ar::ILocalVideoTrack>,
                                        ar::LOCAL_VIDEO_STREAM_STATE,
                                        ar::LOCAL_VIDEO_STREAM_REASON) override {}
@@ -215,6 +237,16 @@ int cppshim_video_encoded_send(
         info.height = height;
     }
     bool ok = p->sender->sendEncodedVideoImage(buf, len, info);
+    if (sta_trace()) {
+        static std::atomic<uint64_t> n{0};
+        uint64_t i = n.fetch_add(1);
+        if (i < 6 || i % 120 == 0) {
+            std::fprintf(stderr,
+                "shim.vid[%llu] codec=%d len=%u key=%d %dx%d rc=%s\n",
+                (unsigned long long)i, codec_type, len, is_keyframe,
+                info.width, info.height, ok ? "ok" : "FAIL");
+        }
+    }
     return ok ? 0 : 1;
 }
 

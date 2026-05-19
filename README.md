@@ -1,13 +1,13 @@
 # stream-to-agora
 
-Stream a local file or `http(s)://` / `rtmp://` / `rtsp://` URL to an Agora RTC channel as a regular publisher. ffmpeg decodes/demuxes the source; H.264/AAC pass through as-is, anything else gets decoded to raw YUV/PCM and pushed via the SDK's external-source APIs.
+Stream a local file or `http(s)://` / `rtmp://` / `rtsp://` URL to an Agora RTC channel as a regular publisher. ffmpeg decodes/demuxes the source; codecs the SDK's encoded senders accept (H.264, H.265, VP8, VP9, AV1 video; AAC/HE-AAC/HE-AACv2, Opus, G.711 audio) pass through as-is, anything else gets decoded to raw YUV/PCM and pushed via the SDK's external-source APIs.
 
 ## Features
 
 - **Local files** — any container/codec ffmpeg can read (`./demo.mp4`, `./loop.mkv`, …).
 - **Remote sources** — `http://`, `https://`, `rtmp://`, `rtsp://`.
-- **Encoded passthrough** — H.264 + AAC inputs are demuxed with `-c copy` (zero CPU on our side); the SDK gets the bitstream as-is.
-- **Raw fallback** — anything else (VP9, Opus, MP3, MPEG-2, …) is decoded by ffmpeg to yuv420p + s16le PCM and pushed via the raw senders.
+- **Encoded passthrough** — H.264/H.265/VP8/VP9/AV1 video and AAC/HE-AAC/HE-AACv2/Opus/G.711 audio are demuxed with `-c copy` (zero CPU on our side); the SDK gets the bitstream as-is. Mode is per-input all-or-nothing: both streams must be passthrough-eligible or the whole input falls back to Raw.
+- **Raw fallback** — anything else (MP3, MPEG-2, AC-3, …) is decoded by ffmpeg to yuv420p + s16le PCM and pushed via the raw senders.
 - **Selective publish** — `--audio-only` / `--video-only` for source previews, audio-only push-to-talk, etc.
 - **Hybrid reconnect** — `http(s)` uses ffmpeg's built-in `-reconnect` flags; RTMP/RTSP respawn the ffmpeg subprocess, bounded by `--reconnect-attempts`.
 - **Token renewal** — `--token-renew-cmd <shell-cmd>` runs your token-minter on `TokenWillExpire` and rotates the token without dropping the channel.
@@ -156,6 +156,25 @@ Mode is chosen at startup by `ffprobe`'ing the input: if both streams use
 codecs Agora's encoded senders accept, ffmpeg is launched with `-c copy`
 (zero-CPU demux); otherwise ffmpeg decodes and we push raw.
 
+### Encoded passthrough caveats
+
+- **Mid-join keyframe latency.** Passthrough forwards the source bitstream
+  verbatim — there is no encoder on our side, so a subscriber's
+  intra-frame request (`onIntraRequestReceived`, sent by WebRTC clients on
+  join / packet loss) cannot be honoured by re-encoding a keyframe. A
+  subscriber who joins mid-stream sees black until the source's next
+  keyframe arrives. For keyframe-dense sources this is sub-second; for
+  sparse-GOP sources the gap is bounded by the source keyframe interval
+  (a 4 s GOP → up to ~4 s of initial black). Raw mode is unaffected (the
+  SDK's own encoder answers PLIs). To minimise mid-join black with
+  passthrough, feed a source with frequent keyframes.
+- **Subscriber decode support is codec-dependent.** The SDK transports
+  every codec above, but the *subscriber* still has to decode it. H.264
+  and VP8 decode in every WebRTC client. VP9 and AV1 decode in
+  Chrome/Edge/Firefox but not Safari. H.265/HEVC only decodes in Safari
+  and hardware-accelerated Chrome. AAC/HE-AAC/HE-AACv2/Opus/G.711 audio
+  decode everywhere. The native Agora SDK subscriber decodes all of them.
+
 The Agora NG SDK ships a flat C API (`agora_service_create`, `agora_rtc_conn_connect`, `agora_video_frame_sender_send`, …), which Rust links directly via `extern "C"` for everything except the encoded senders — see §Known Issues. The encoded path routes through a small C++ shim in `cpp/agora_shim.cpp`.
 
 - `src/main.rs` — CLI, ffmpeg subprocess management, frame pacing
@@ -197,6 +216,24 @@ a slice with `first_mb_in_slice == 0`). Verified end-to-end against the
 same channel as the SDK sample: subscriber decodes, no intra-request
 flood. The shim no longer strips SEI or overrides `captureTimeMs` — both
 were earlier mis-diagnoses that deviated from the working sample.
+
+### Resolved: VP8/VP9/AV1 passthrough sent the SDK mislabeled bitstream
+
+When VP8/VP9/AV1 encoded passthrough was first added, `video_codec_type`
+(`src/agora/video.rs`) only mapped `hevc`; every other non-H.264 codec
+fell through to `0`, so the shim told the SDK the bytes were H.264. The
+SDK accepted every frame (`rc=ok`) but emitted an undecodable stream —
+subscribers saw no video at all (not even black). It went unnoticed
+because no test exercised `video_codec_type` and the e2e harness only
+checks publisher liveness, never subscriber decode.
+
+Fixed by mapping every passthrough codec to its real `VIDEO_CODEC_TYPE`
+enum (VP8=1, H265=3, AV1=12, VP9=13). Guarded by
+`video_codec_type_maps_every_encoded_codec` (and the matching
+`audio_codec_maps_codec_and_profile`) so a regression fails `cargo test`.
+The env-gated `STA_TRACE=1` shim diagnostic (`shim.vid[N] codec=… WxH
+rc=…`) was retained — it is what localised this bug and pins the
+codec/dimensions actually handed to the SDK.
 
 ## Development
 
