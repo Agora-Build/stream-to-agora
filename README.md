@@ -16,12 +16,16 @@ Stream a local file or `http(s)://` / `rtmp://` / `rtsp://` URL to an Agora RTC 
 
 ## Platforms
 
-Linux (x86_64, aarch64) and macOS (x86_64, aarch64). Windows is not on the roadmap; PRs welcome.
+| Platform | Source build | Released binary |
+|----------|--------------|-----------------|
+| Linux x86_64 | ✅ | ✅ |
+| Linux aarch64 | ✅ | ✅ |
+| macOS arm64 / x86_64 | ✅ (CMake wires the SDK URL) | ❌ (macOS RTSA tarball URL not yet verified) |
+| Windows | — | — (not on the roadmap; PRs welcome) |
 
 ## Install
 
-> **Runtime requirement:** `ffmpeg` and `ffprobe` must be on `PATH`
-> (Phase 2+; not needed for Phase 1's connect-only mode).
+> **Runtime requirement:** `ffmpeg` and `ffprobe` must be on `PATH`.
 > Debian/Ubuntu: `sudo apt-get install -y ffmpeg`. macOS: `brew install ffmpeg`.
 
 ```bash

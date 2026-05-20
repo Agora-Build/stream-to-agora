@@ -5,5 +5,5 @@
 pub mod probe;
 pub mod pipeline;
 
-pub use probe::{probe, MediaInfo, Stream};
+pub use probe::{probe, MediaInfo};
 pub use pipeline::Pipeline;

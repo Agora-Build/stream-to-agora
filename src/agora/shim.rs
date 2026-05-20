@@ -27,16 +27,10 @@ pub struct cppshim_audio_pub {
 pub struct cppshim_local_user_observer {
     _private: [u8; 0],
 }
-#[repr(C)]
-pub struct cppshim_conn_observer {
-    _private: [u8; 0],
-}
 
 unsafe extern "C" {
     pub fn cppshim_local_user_observer_register(c_conn_handle: *mut c_void) -> *mut cppshim_local_user_observer;
     pub fn cppshim_local_user_observer_destroy(obs: *mut cppshim_local_user_observer);
-    pub fn cppshim_conn_observer_register(c_conn_handle: *mut c_void) -> *mut cppshim_conn_observer;
-    pub fn cppshim_conn_observer_destroy(obs: *mut cppshim_conn_observer);
 
     pub fn cppshim_video_encoded_create(
         c_service_handle: *mut c_void,

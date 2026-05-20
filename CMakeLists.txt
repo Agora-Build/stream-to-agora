@@ -14,19 +14,23 @@
 cmake_minimum_required(VERSION 3.16)
 project(stream_to_agora_native NONE)
 
-set(AGORA_RTC_SDK_VERSION "v4.4.32-20250425_144419-675648")
+# The SDK is published per (arch × OS) with its own build-time suffix —
+# the suffix differs across tarballs, so we can't share one version
+# string. Each platform pins the exact tarball Agora published.
+set(AGORA_RTC_SDK_LINUX_X86_64   "v4.4.32-20250425_144419-675648")
+set(AGORA_RTC_SDK_LINUX_AARCH64  "v4.4.32-20250425_150503-675674")
+set(AGORA_RTC_SDK_DARWIN         "v4.4.32-20250425_144419-675648")  # macOS tarballs not yet verified
 
 # ── Platform → SDK URL ────────────────────────────────────────────────
 if(NOT DEFINED AGORA_SDK_URL)
     if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64)$")
-        set(AGORA_SDK_URL "https://download.agora.io/rtsasdk/release/Agora-RTC-x86_64-linux-gnu-${AGORA_RTC_SDK_VERSION}.tgz")
+        set(AGORA_SDK_URL "https://download.agora.io/rtsasdk/release/Agora-RTC-x86_64-linux-gnu-${AGORA_RTC_SDK_LINUX_X86_64}.tgz")
     elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)$")
-        # TODO: confirm the exact aarch64 URL from Agora console.
-        message(FATAL_ERROR "Linux aarch64 SDK URL not configured yet — pass -DAGORA_SDK_URL=...")
+        set(AGORA_SDK_URL "https://download.agora.io/rtsasdk/release/Agora-RTC-aarch64-linux-gnu-${AGORA_RTC_SDK_LINUX_AARCH64}.tgz")
     elseif(CMAKE_SYSTEM_NAME STREQUAL "Darwin" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64)$")
-        set(AGORA_SDK_URL "https://download.agora.io/rtsasdk/release/Agora-RTC-x86_64-apple-darwin-${AGORA_RTC_SDK_VERSION}.tgz")
+        set(AGORA_SDK_URL "https://download.agora.io/rtsasdk/release/Agora-RTC-x86_64-apple-darwin-${AGORA_RTC_SDK_DARWIN}.tgz")
     elseif(CMAKE_SYSTEM_NAME STREQUAL "Darwin" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm64|aarch64)$")
-        set(AGORA_SDK_URL "https://download.agora.io/rtsasdk/release/Agora-RTC-arm64-apple-darwin-${AGORA_RTC_SDK_VERSION}.tgz")
+        set(AGORA_SDK_URL "https://download.agora.io/rtsasdk/release/Agora-RTC-arm64-apple-darwin-${AGORA_RTC_SDK_DARWIN}.tgz")
     else()
         message(FATAL_ERROR "Unsupported platform: ${CMAKE_SYSTEM_NAME}/${CMAKE_SYSTEM_PROCESSOR}")
     endif()

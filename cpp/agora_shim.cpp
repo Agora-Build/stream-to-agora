@@ -106,32 +106,6 @@ public:
                                        ar::LOCAL_VIDEO_STREAM_REASON) override {}
 };
 
-// No-op C++ IRtcConnectionObserver. Registering one (vs only the flat-C
-// observer Rust uses to learn "connected") is what wires the video RTCP
-// feedback path. Without it, the SDK accepts every encoded video frame
-// (rc=0) but the RTP it emits never assembles into a frame at WebRTC
-// subscribers — audio survives, video stays black. The flat-C observer
-// keeps feeding Rust the Connected event; this one exists purely to flip
-// the SDK into the working code path, exactly like NoopLocalUserObserver.
-class NoopConnObserver : public ar::IRtcConnectionObserver {
-public:
-    void onConnected(const ar::TConnectionInfo&, ar::CONNECTION_CHANGED_REASON_TYPE) override {}
-    void onDisconnected(const ar::TConnectionInfo&, ar::CONNECTION_CHANGED_REASON_TYPE) override {}
-    void onConnecting(const ar::TConnectionInfo&, ar::CONNECTION_CHANGED_REASON_TYPE) override {}
-    void onReconnecting(const ar::TConnectionInfo&, ar::CONNECTION_CHANGED_REASON_TYPE) override {}
-    void onReconnected(const ar::TConnectionInfo&, ar::CONNECTION_CHANGED_REASON_TYPE) override {}
-    void onConnectionLost(const ar::TConnectionInfo&) override {}
-    void onLastmileQuality(const ar::QUALITY_TYPE) override {}
-    void onLastmileProbeResult(const ar::LastmileProbeResult&) override {}
-    void onTokenPrivilegeWillExpire(const char*) override {}
-    void onTokenPrivilegeDidExpire() override {}
-    void onConnectionFailure(const ar::TConnectionInfo&, ar::CONNECTION_CHANGED_REASON_TYPE) override {}
-    void onUserJoined(agora::user_id_t) override {}
-    void onUserLeft(agora::user_id_t, ar::USER_OFFLINE_REASON_TYPE) override {}
-    void onTransportStats(const ar::RtcStats&) override {}
-    void onChannelMediaRelayStateChanged(int, int) override {}
-};
-
 // Helper: a flat-C handle from `agora_*_create` is a pointer to a small
 // struct whose first 8 bytes hold the underlying C++ object pointer (verified
 // by disassembly of the C wrappers — they do `mov (handle), %rdi` before
@@ -373,31 +347,6 @@ cppshim_local_user_observer* cppshim_local_user_observer_register(void* c_conn_h
 void cppshim_local_user_observer_destroy(cppshim_local_user_observer* obs) {
     if (!obs) return;
     if (obs->local) obs->local->unregisterLocalUserObserver(&obs->impl);
-    delete obs;
-}
-
-// --- ConnectionObserver registration ---
-
-struct cppshim_conn_observer {
-    NoopConnObserver impl;
-    ar::IRtcConnection* conn;  // borrowed
-};
-
-cppshim_conn_observer* cppshim_conn_observer_register(void* c_conn_handle) {
-    auto* conn = deref_c_handle<ar::IRtcConnection>(c_conn_handle);
-    if (!conn) return nullptr;
-    auto* obs = new cppshim_conn_observer{};
-    obs->conn = conn;
-    if (conn->registerObserver(&obs->impl) != 0) {
-        delete obs;
-        return nullptr;
-    }
-    return obs;
-}
-
-void cppshim_conn_observer_destroy(cppshim_conn_observer* obs) {
-    if (!obs) return;
-    if (obs->conn) obs->conn->unregisterObserver(&obs->impl);
     delete obs;
 }
 

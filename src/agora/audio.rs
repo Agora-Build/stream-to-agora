@@ -138,11 +138,6 @@ impl EncodedAudioPublisher {
         let rc = unsafe { shim::cppshim_audio_encoded_publish(self.shim, self.conn) };
         check(rc, "cppshim_audio_encoded_publish")
     }
-
-    pub fn unpublish(&self) -> Result<(), AgoraError> {
-        let rc = unsafe { shim::cppshim_audio_encoded_unpublish(self.shim, self.conn) };
-        check(rc, "cppshim_audio_encoded_unpublish")
-    }
 }
 
 impl Drop for EncodedAudioPublisher {
@@ -188,12 +183,6 @@ impl RawAudioPublisher {
         let local = unsafe { sys::agora_rtc_conn_get_local_user(self.conn) };
         let rc = unsafe { sys::agora_local_user_publish_audio(local, self.track) };
         check(rc, "agora_local_user_publish_audio")
-    }
-
-    pub fn unpublish(&self) -> Result<(), AgoraError> {
-        let local = unsafe { sys::agora_rtc_conn_get_local_user(self.conn) };
-        let rc = unsafe { sys::agora_local_user_unpublish_audio(local, self.track) };
-        check(rc, "agora_local_user_unpublish_audio")
     }
 }
 

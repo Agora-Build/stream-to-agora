@@ -23,13 +23,6 @@ typedef struct cppshim_local_user_observer cppshim_local_user_observer;
 cppshim_local_user_observer* cppshim_local_user_observer_register(void* c_conn_handle);
 void cppshim_local_user_observer_destroy(cppshim_local_user_observer* obs);
 
-// Register a no-op C++ IRtcConnectionObserver. Registered alongside the
-// flat-C observer Rust uses; required for the video RTCP feedback path
-// (audio works without it, video doesn't). Returns NULL on failure.
-typedef struct cppshim_conn_observer cppshim_conn_observer;
-cppshim_conn_observer* cppshim_conn_observer_register(void* c_conn_handle);
-void cppshim_conn_observer_destroy(cppshim_conn_observer* obs);
-
 // Create an encoded-video publisher (sender + custom track).
 //
 // `c_service_handle`, `c_factory_handle` are the flat-C handles we already

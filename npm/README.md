@@ -1,18 +1,24 @@
 # @agora-build/stream-to-agora
 
-Stream a local file or `http(s)://` / `rtmp://` / `rtsp://` URL to an [Agora](https://www.agora.io) RTC channel as a regular publisher. ffmpeg decodes/demuxes the source; H.264/AAC pass through as-is, anything else is decoded to raw YUV/PCM and pushed via the SDK's external-source APIs — useful for load testing, demos, simulated participants, and pumping pre-recorded media into a live channel.
+Stream a local file or `http(s)://` / `rtmp://` / `rtsp://` URL to an [Agora](https://www.agora.io) RTC channel as a regular publisher. ffmpeg decodes/demuxes the source; codecs the SDK's encoded senders accept (H.264, H.265, VP8, VP9, AV1 video; AAC/HE-AAC/HE-AACv2, Opus, G.711 audio) pass through as-is, anything else is decoded to raw YUV/PCM and pushed via the raw senders — useful for load testing, demos, simulated participants, and pumping pre-recorded media into a live channel.
 
 ## Features
 
 - **Local files** — any container/codec ffmpeg can read (`./demo.mp4`, `./loop.mkv`, …).
 - **Remote sources** — `http://`, `https://`, `rtmp://`, `rtsp://`.
-- **Encoded passthrough** — H.264 + AAC inputs are demuxed with `-c copy` (zero CPU on our side); the SDK gets the bitstream as-is.
-- **Raw fallback** — anything else (VP9, Opus, MP3, MPEG-2, …) is decoded by ffmpeg to yuv420p + s16le PCM and pushed via the raw senders.
+- **Encoded passthrough** — H.264/H.265/VP8/VP9/AV1 video and AAC/HE-AAC/HE-AACv2/Opus/G.711 audio are demuxed with `-c copy` (zero CPU on our side); the SDK gets the bitstream as-is. Mode is per-input all-or-nothing: both streams must be passthrough-eligible or the whole input falls back to Raw.
+- **Raw fallback** — anything else (MP3, MPEG-2, AC-3, …) is decoded by ffmpeg to yuv420p + s16le PCM and pushed via the raw senders.
 - **Selective publish** — `--audio-only` / `--video-only`.
 - **Hybrid reconnect** — `http(s)` uses ffmpeg's built-in `-reconnect` flags; RTMP/RTSP respawn the ffmpeg subprocess, bounded by `--reconnect-attempts`.
 - **Token renewal** — `--token-renew-cmd <shell-cmd>` runs your token-minter on `TokenWillExpire` and rotates the token without dropping the channel.
 - **`--loop` forever** — steady-state load testing from a single short file.
 - **ffmpeg passthrough flags** — `--http-header K:V` (repeatable), `--user-agent`, `--rtsp-transport tcp|udp|http`.
+
+### Encoded passthrough caveats
+
+- **VP9 and AV1 currently don't render** at subscribers on RTSA 4.4.32: the SDK accepts the frames but emits no RTP for those codecs (verified with Agora's own sample sender + native receiver — VP8 control passes). The publisher side is correct and will start rendering automatically once Agora wires the missing packetizers; until then prefer H.264 / H.265 / VP8 for video.
+- Subscriber decode support is codec-dependent: H.264/VP8 every WebRTC client; H.265 Safari + hardware-accelerated Chrome; VP9/AV1 Chrome/Edge/Firefox (when the SDK ships them). Agora's native SDK subscriber decodes all.
+- Passthrough cannot synthesise keyframes to answer `onIntraRequestReceived`; mid-join black at a browser subscriber is bounded by the source's keyframe interval (sub-second for keyframe-dense inputs).
 
 ## Install
 
@@ -26,7 +32,7 @@ Or via shell script:
 curl -fsSL https://dl.agora.build/stream-to-agora/install.sh | bash
 ```
 
-Both download a prebuilt bundle for your platform (linux-x64, linux-arm64, darwin-x64, darwin-arm64) — the binary plus the Agora SDK shared libraries it depends on. The binary's rpath finds the libs at runtime, so there's no `LD_LIBRARY_PATH` / `DYLD_LIBRARY_PATH` setup.
+Both download a prebuilt bundle for your platform (currently `linux-x86_64` and `linux-aarch64`; macOS not yet released — `cargo build --release` from source still works on Apple Silicon and Intel) — the binary plus the Agora SDK shared libraries it depends on. The binary's rpath finds the libs at runtime, so there's no `LD_LIBRARY_PATH` / `DYLD_LIBRARY_PATH` setup.
 
 ## Usage
 
@@ -85,12 +91,12 @@ Two publishers on the same channel must use different uids (Agora kicks a duplic
 
 ## Supported Platforms
 
-| Platform | Architecture |
-|---|---|
-| Linux | x64, arm64 |
-| macOS | x64, arm64 |
-
-Windows is not on the roadmap.
+| Platform | Source build | Released binary |
+|----------|--------------|-----------------|
+| Linux x86_64 | ✅ | ✅ |
+| Linux aarch64 | ✅ | ✅ |
+| macOS arm64 / x86_64 | ✅ | ❌ (macOS RTSA tarball URL not yet verified) |
+| Windows | — | — (not on the roadmap) |
 
 ## Build from Source
 

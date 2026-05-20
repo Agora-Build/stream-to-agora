@@ -86,12 +86,6 @@ impl AudioPublisher {
             AudioPublisher::Raw(p) => p.publish(),
         }
     }
-    pub fn unpublish(&self) -> Result<(), AgoraError> {
-        match self {
-            AudioPublisher::Encoded(p) => p.unpublish(),
-            AudioPublisher::Raw(p) => p.unpublish(),
-        }
-    }
 }
 
 impl VideoPublisher {
@@ -99,12 +93,6 @@ impl VideoPublisher {
         match self {
             VideoPublisher::Encoded(p) => p.publish(),
             VideoPublisher::Raw(p) => p.publish(),
-        }
-    }
-    pub fn unpublish(&self) -> Result<(), AgoraError> {
-        match self {
-            VideoPublisher::Encoded(p) => p.unpublish(),
-            VideoPublisher::Raw(p) => p.unpublish(),
         }
     }
 }
