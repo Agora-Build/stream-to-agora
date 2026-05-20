@@ -1,8 +1,8 @@
 //! Codec-mode decision + the public publisher enums.
 //!
-//! The publisher enums are placeholder unit-variants in this task —
-//! Task 11 replaces them with real variants holding the per-mode
-//! publisher structs from Tasks 9 and 10.
+//! `AudioPublisher`/`VideoPublisher` wrap the per-mode publisher structs
+//! (`audio.rs`/`video.rs`) behind one `Encoded`/`Raw` enum so callers
+//! don't branch on the mode `decide()` picked at startup.
 
 use crate::ffmpeg::MediaInfo;
 
@@ -19,8 +19,8 @@ pub enum CodecMode {
 }
 
 /// The video codec names ffprobe reports for codecs we can publish via
-/// `agora_video_encoded_image_sender_send` **AND** for which our current
-/// ffmpeg pipeline output format (`-f h264`, Annex-B) is correct.
+/// the encoded-image sender **AND** for which our ffmpeg pipeline emits a
+/// container the matching parser understands.
 ///
 /// Passthrough video codecs: H.264/H.265 (Annex-B, `-f h264`/`-f hevc`,
 /// `parse::h264`/`parse::hevc`) and VP8/VP9/AV1 (IVF, `-f ivf`,
@@ -86,12 +86,6 @@ impl AudioPublisher {
             AudioPublisher::Raw(p) => p.publish(),
         }
     }
-    pub fn unpublish(&self) -> Result<(), AgoraError> {
-        match self {
-            AudioPublisher::Encoded(p) => p.unpublish(),
-            AudioPublisher::Raw(p) => p.unpublish(),
-        }
-    }
 }
 
 impl VideoPublisher {
@@ -99,12 +93,6 @@ impl VideoPublisher {
         match self {
             VideoPublisher::Encoded(p) => p.publish(),
             VideoPublisher::Raw(p) => p.publish(),
-        }
-    }
-    pub fn unpublish(&self) -> Result<(), AgoraError> {
-        match self {
-            VideoPublisher::Encoded(p) => p.unpublish(),
-            VideoPublisher::Raw(p) => p.unpublish(),
         }
     }
 }

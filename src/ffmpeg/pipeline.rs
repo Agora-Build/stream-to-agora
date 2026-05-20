@@ -29,12 +29,7 @@ pub struct PipelineOpts {
     pub http_headers: Vec<String>,
     pub user_agent: Option<String>,
     pub rtsp_transport: Option<String>,
-    pub reconnect_attempts: u32,
     pub loop_forever: bool,
-}
-
-impl PipelineOpts {
-    pub fn with_loop(mut self, l: bool) -> Self { self.loop_forever = l; self }
 }
 
 /// Pure input-side argument builder. Returns the args that go BEFORE
@@ -156,11 +151,9 @@ impl Pipeline {
         Ok(Pipeline { video, audio })
     }
 
+    #[cfg(test)]
     pub fn video_stdout(&mut self) -> Option<&mut ChildStdout> {
         self.video.as_mut().and_then(|s| s.stdout())
-    }
-    pub fn audio_stdout(&mut self) -> Option<&mut ChildStdout> {
-        self.audio.as_mut().and_then(|s| s.stdout())
     }
 }
 
@@ -261,12 +254,11 @@ mod tests {
             .unwrap_or_else(|| PathBuf::from("/usr/bin/ffmpeg"))
     }
 
-    fn opts(headers: &[&str], ua: Option<&str>, rtsp: Option<&str>, attempts: u32) -> PipelineOpts {
+    fn opts(headers: &[&str], ua: Option<&str>, rtsp: Option<&str>, _attempts: u32) -> PipelineOpts {
         PipelineOpts {
             http_headers: headers.iter().map(|s| s.to_string()).collect(),
             user_agent: ua.map(String::from),
             rtsp_transport: rtsp.map(String::from),
-            reconnect_attempts: attempts,
             loop_forever: false,
         }
     }
@@ -315,7 +307,9 @@ mod tests {
 
     #[test]
     fn input_args_loop_forever_emits_stream_loop() {
-        let a = input_args(InputKindLite::LocalFile, &opts(&[], None, None, 0).with_loop(true));
+        let mut o = opts(&[], None, None, 0);
+        o.loop_forever = true;
+        let a = input_args(InputKindLite::LocalFile, &o);
         assert!(a.windows(2).any(|w| w == ["-stream_loop", "-1"]));
     }
 

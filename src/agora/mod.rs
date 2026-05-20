@@ -16,4 +16,4 @@ pub mod audio;
 pub use error::AgoraError;
 pub use observer::ConnEvent;
 pub use publisher::{decide, AudioPublisher, CodecMode, VideoPublisher};
-pub use session::{CancelToken, RenewHandle, Session, SessionConfig};
+pub use session::{CancelToken, Session, SessionConfig};

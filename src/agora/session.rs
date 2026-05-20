@@ -2,10 +2,9 @@
 //!
 //! Lifecycle: `Session::connect(cfg)` → creates+initializes the service,
 //! creates the RTC connection, registers the observer, calls
-//! `agora_rtc_conn_connect`, and waits up to `connect_timeout` for the
-//! `on_connected` event. `run()` then idles until SIGINT / `--duration`.
-//! `Drop` disconnects, destroys the connection, and releases the service —
-//! in that order.
+//! `agora_rtc_conn_connect`; the caller then awaits `wait_connected(timeout)`.
+//! `run()` idles until SIGINT / `--duration`. `Drop` disconnects, destroys
+//! the connection, and releases the service — in that order.
 
 use std::ffi::CString;
 use std::os::raw::c_void;
@@ -105,7 +104,6 @@ pub struct SessionConfig {
     /// `true` when `user_id` is a string account (non-digit, or `s/`-prefixed).
     pub use_string_uid: bool,
     pub token: String,
-    pub connect_timeout: Duration,
 }
 
 pub struct Session {
@@ -151,9 +149,6 @@ pub struct Session {
     /// subscribers can reassemble. Destroyed in `Drop` before the conn
     /// goes away.
     local_user_obs: *mut super::shim::cppshim_local_user_observer,
-    /// No-op C++ IRtcConnectionObserver — required for the video RTCP
-    /// feedback path. Destroyed in Drop before the conn.
-    conn_obs: *mut super::shim::cppshim_conn_observer,
 }
 
 
@@ -250,10 +245,6 @@ impl Session {
             return Err(AgoraError::null("cppshim_local_user_observer_register"));
         }
 
-        // (no separate C++ IRtcConnectionObserver — reverted; the
-        // LocalUserObserver above is what wires the video pipeline.)
-        let conn_obs = std::ptr::null_mut();
-
         // 4. Connect.
         let rc = unsafe {
             sys::agora_rtc_conn_connect(conn, token.as_ptr(), channel.as_ptr(), user_id.as_ptr())
@@ -292,7 +283,6 @@ impl Session {
             cancel: CancelToken::new(),
             pump_handles: tokio::sync::Mutex::new(Vec::new()),
             local_user_obs,
-            conn_obs,
         })
     }
 
@@ -343,7 +333,6 @@ impl Session {
 
     /// Create a publisher for the chosen codec mode. The returned
     /// AudioPublisher owns the underlying SDK sender + track handles.
-    /// Wired in Task 11; per-mode publishers come from Tasks 9–10.
     pub fn create_audio_publisher(
         &self,
         mode: super::publisher::CodecMode,
@@ -412,11 +401,6 @@ impl Session {
         RenewHandle { conn: self.conn }
     }
 
-    /// Direct renew (for tests / callers that already have `&self`).
-    pub fn renew_token(&self, new_token: &str) -> Result<(), AgoraError> {
-        renew_token_inner(self.conn, new_token)
-    }
-
     /// Optional second event sender for the renew task. Forwarded into
     /// `observer::set_renew_sender`. Called by main.rs once during startup
     /// when `--token-renew-cmd` is set.
@@ -430,11 +414,7 @@ impl Drop for Session {
         // Best-effort teardown in the required order. Errors can't propagate
         // from Drop; log them.
         unsafe {
-            // C++ observers before conn teardown (they borrow conn/local-user).
-            if !self.conn_obs.is_null() {
-                super::shim::cppshim_conn_observer_destroy(self.conn_obs);
-                self.conn_obs = std::ptr::null_mut();
-            }
+            // C++ observer before conn teardown (it borrows the local user).
             if !self.local_user_obs.is_null() {
                 super::shim::cppshim_local_user_observer_destroy(self.local_user_obs);
                 self.local_user_obs = std::ptr::null_mut();

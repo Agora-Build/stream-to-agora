@@ -101,12 +101,13 @@ main() {
   local platform version install_dir lib_dir
   platform="$(detect_platform)"
 
-  # The Agora RTSA SDK currently ships only for x86_64 Linux, so that's
-  # the only prebuilt we publish. Other platforms will be added when the
-  # corresponding SDK builds become available.
-  if [ "$platform" != "linux-x86_64" ]; then
-    die "No prebuilt available for ${platform} yet — stream-to-agora currently supports linux-x86_64 only. Build from source: https://github.com/Agora-Build/stream-to-agora"
-  fi
+  # We publish prebuilts for the platforms with a verified Agora RTSA SDK
+  # tarball. macOS tarballs are not yet wired into releases (build from
+  # source on Apple Silicon / Intel).
+  case "$platform" in
+    linux-x86_64|linux-aarch64) ;;
+    *) die "No prebuilt available for ${platform} yet — stream-to-agora currently supports linux-x86_64 and linux-aarch64. Build from source: https://github.com/Agora-Build/stream-to-agora" ;;
+  esac
 
   version="$(resolve_version)"
   install_dir="$(pick_install_dir)"

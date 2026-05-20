@@ -20,6 +20,14 @@ cd tests/fixtures
 
 X264_BASELINE='-c:v libx264 -preset medium -profile:v baseline -level 3.0 -pix_fmt yuv420p'
 
+# Recognisable beep pattern (not a flat tone): every 0.5 s a 0.3 s tone
+# then 0.2 s of silence (distinct beeps with gaps); pitch alternates per
+# 1 s between 440 Hz ("beep") and 880 Hz ("dee"); loudness cycles through
+# three levels (~0.22 / 0.50 / 0.78) every 0.5 s so volume audibly
+# varies. Single-quoted so the expression's commas aren't parsed as
+# lavfi filtergraph separators.
+BEEP_SRC="aevalsrc=exprs='if(lt(mod(t,0.5),0.3), (0.22+0.28*mod(floor(t/0.5),3))*sin(2*PI*(440+440*mod(floor(t/1),2))*t), 0)':d=5:s=48000"
+
 regen_motion_pattern_5s() {
     echo "→ motion-pattern-5s.mp4"
     ffmpeg -hide_banner -loglevel error -y \
@@ -77,7 +85,7 @@ regen_vp8_opus_5s() {
     echo "→ vp8-opus-5s.webm (VP8 + Opus encoded-passthrough fixture)"
     ffmpeg -hide_banner -loglevel error -y \
       -f lavfi -i "testsrc=duration=5:size=320x240:rate=15" \
-      -f lavfi -i "sine=frequency=440:duration=5" \
+      -f lavfi -i "$BEEP_SRC" \
       -c:v libvpx -b:v 300k -g 15 -keyint_min 15 -deadline realtime \
       -c:a libopus -ar 48000 -ac 1 -b:a 64k -shortest \
       vp8-opus-5s.webm
@@ -87,8 +95,9 @@ regen_vp9_opus_5s() {
     echo "→ vp9-opus-5s.webm (VP9 + Opus encoded-passthrough fixture)"
     ffmpeg -hide_banner -loglevel error -y \
       -f lavfi -i "testsrc=duration=5:size=320x240:rate=15" \
-      -f lavfi -i "sine=frequency=440:duration=5" \
-      -c:v libvpx-vp9 -b:v 300k -g 15 -keyint_min 15 -deadline realtime \
+      -f lavfi -i "$BEEP_SRC" \
+      -c:v libvpx-vp9 -profile:v 0 -pix_fmt yuv420p \
+      -b:v 300k -g 15 -keyint_min 15 -deadline realtime \
       -c:a libopus -ar 48000 -ac 1 -b:a 64k -shortest \
       vp9-opus-5s.webm
 }
@@ -97,7 +106,7 @@ regen_av1_aac_5s() {
     echo "→ av1-aac-5s.mp4 (AV1 + AAC encoded-passthrough fixture)"
     ffmpeg -hide_banner -loglevel error -y \
       -f lavfi -i "testsrc=duration=5:size=320x240:rate=15" \
-      -f lavfi -i "sine=frequency=440:duration=5" \
+      -f lavfi -i "$BEEP_SRC" \
       -c:v libsvtav1 -preset 10 -g 15 \
       -c:a aac -ar 48000 -ac 1 -b:a 96k -shortest \
       av1-aac-5s.mp4

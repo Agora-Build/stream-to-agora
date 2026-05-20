@@ -17,14 +17,20 @@
 // still holds (service / connection / factory) by dereferencing them —
 // see deref_c_handle() below.
 //
-// Bitstream handling: this shim forwards each access unit to
-// sendEncodedVideoImage exactly as produced by parse::h264::next_au —
-// SPS+PPS+IDR grouped into the keyframe AU, leading SEI kept, no
-// captureTimeMs override — byte-for-byte the SDK sample's
-// sendOneH264Frame. (Splitting at the second VCL slice, stripping SEI,
-// or setting captureTimeMs all broke subscriber decode → endless
-// intra-frame requests / black video.) SenderOptions.codecType must
-// match the bitstream (H.264); it's set by the Rust caller.
+// Bitstream handling: the shim forwards each access unit / frame
+// exactly as produced by the upstream parser (parse::h264 / parse::hevc
+// / parse::ivf) — no SEI strip, no captureTimeMs override — byte-for-
+// byte matching the corresponding SDK sample (sample_send_h264_pcm /
+// sample_send_h265 / sample_send_ivfvp8). Per-codec setup, selected by
+// the `codec_type` the Rust caller passes (video::video_codec_type):
+//   - H.264 (codec_type 0): default SenderOptions, no encoder config —
+//     the proven v0.2.2 path.
+//   - H.265/VP8/VP9/AV1 (non-zero): setVideoEncoderConfiguration with
+//     the matching codecType + per-frame info.codecType; VP8/VP9/AV1
+//     also need per-frame info.width/height (no in-band SPS to derive
+//     size from). SenderOptions.codecType is never set (matches every
+//     SDK sample). A wrong/zero codec_type makes the SDK mislabel the
+//     bitstream → subscribers get no decodable video.
 
 #include "agora_shim.h"
 
@@ -37,8 +43,22 @@
 #include "NGIAgoraAudioTrack.h"
 #include "AgoraBase.h"
 
+#include <cstdio>
+#include <cstdlib>
+#include <atomic>
+
 namespace ar = agora::rtc;
 namespace ab = agora::base;
+
+// Env-gated diagnostic (STA_TRACE=1): localises where the encoded-video
+// path breaks for a codec — the codec/dimensions actually handed to the
+// SDK, whether it accepts frames, whether a subscriber negotiates the
+// track (intra requests). Retained: it is what pinned the VP8/VP9/AV1
+// codec-mislabel bug (see README §Known Issues); off unless STA_TRACE set.
+static bool sta_trace() {
+    static bool t = std::getenv("STA_TRACE") != nullptr;
+    return t;
+}
 
 // No-op LocalUserObserver. The SDK sample registers one; without it, the
 // SDK's RTP packetizer doesn't produce frames the WebRTC depacketizer can
@@ -78,36 +98,12 @@ public:
 
     // Subscriber-driven keyframe request (PLI). A future enhancement
     // could signal the pump to emit a fresh IDR on demand.
-    void onIntraRequestReceived() override {}
+    void onIntraRequestReceived() override {
+        if (sta_trace()) std::fprintf(stderr, "shim.intra\n");
+    }
     void onLocalVideoTrackStateChanged(agora::agora_refptr<ar::ILocalVideoTrack>,
                                        ar::LOCAL_VIDEO_STREAM_STATE,
                                        ar::LOCAL_VIDEO_STREAM_REASON) override {}
-};
-
-// No-op C++ IRtcConnectionObserver. Registering one (vs only the flat-C
-// observer Rust uses to learn "connected") is what wires the video RTCP
-// feedback path. Without it, the SDK accepts every encoded video frame
-// (rc=0) but the RTP it emits never assembles into a frame at WebRTC
-// subscribers — audio survives, video stays black. The flat-C observer
-// keeps feeding Rust the Connected event; this one exists purely to flip
-// the SDK into the working code path, exactly like NoopLocalUserObserver.
-class NoopConnObserver : public ar::IRtcConnectionObserver {
-public:
-    void onConnected(const ar::TConnectionInfo&, ar::CONNECTION_CHANGED_REASON_TYPE) override {}
-    void onDisconnected(const ar::TConnectionInfo&, ar::CONNECTION_CHANGED_REASON_TYPE) override {}
-    void onConnecting(const ar::TConnectionInfo&, ar::CONNECTION_CHANGED_REASON_TYPE) override {}
-    void onReconnecting(const ar::TConnectionInfo&, ar::CONNECTION_CHANGED_REASON_TYPE) override {}
-    void onReconnected(const ar::TConnectionInfo&, ar::CONNECTION_CHANGED_REASON_TYPE) override {}
-    void onConnectionLost(const ar::TConnectionInfo&) override {}
-    void onLastmileQuality(const ar::QUALITY_TYPE) override {}
-    void onLastmileProbeResult(const ar::LastmileProbeResult&) override {}
-    void onTokenPrivilegeWillExpire(const char*) override {}
-    void onTokenPrivilegeDidExpire() override {}
-    void onConnectionFailure(const ar::TConnectionInfo&, ar::CONNECTION_CHANGED_REASON_TYPE) override {}
-    void onUserJoined(agora::user_id_t) override {}
-    void onUserLeft(agora::user_id_t, ar::USER_OFFLINE_REASON_TYPE) override {}
-    void onTransportStats(const ar::RtcStats&) override {}
-    void onChannelMediaRelayStateChanged(int, int) override {}
 };
 
 // Helper: a flat-C handle from `agora_*_create` is a pointer to a small
@@ -140,24 +136,29 @@ cppshim_video_pub* cppshim_video_encoded_create(
     auto sender = factory->createVideoEncodedImageSender();
     if (!sender) return nullptr;
 
+    // Match every SDK sample (sample_send_h264_pcm / h265 / ivfvp8):
+    // they set ONLY ccMode=CC_ENABLED on SenderOptions and never touch
+    // SenderOptions.codecType — routing is done by the per-frame
+    // EncodedVideoFrameInfo.codecType + setVideoEncoderConfiguration.
+    // (Setting opts.codecType is a no-op for H.264/H.265 — it equals the
+    // C++ default — but for VP8/VP9/AV1 it diverges from the sample and
+    // stops the track from being published.) CC_ENABLED is also the
+    // default, so this is byte-identical for the proven H.26x paths.
     ar::SenderOptions opts;
-    // C++ defaults: ccMode=CC_ENABLED, codecType=H265, targetBitrate=6500.
-    // The H.264 sample leaves these at default (proven by the v0.2.2
-    // release — callers pass codec_type=0 for H.264 to preserve it); the
-    // per-frame EncodedVideoFrameInfo.codecType is what routes the bytes.
-    if (codec_type != 0) {
-        opts.codecType = static_cast<ar::VIDEO_CODEC_TYPE>(codec_type);
-    }
+    opts.ccMode = ar::TCcMode::CC_ENABLED;
 
     auto track = service->createCustomVideoTrack(sender, opts);
     if (!track) return nullptr;
 
-    // H.265: mirror sample_send_h265 — pin the track's encoder config to
-    // H265 as well. H.264 deliberately skips this (matches the proven
-    // sample_send_h264_pcm, which sets no encoder configuration).
-    if (codec_type == 3) {
+    // Every non-H.264 codec must pin the track's encoder config to its
+    // codec, or the SDK never negotiates/packetizes it and subscribers
+    // get no video. The SDK's own samples confirm this: sample_send_h265
+    // and sample_send_ivfvp8 both call setVideoEncoderConfiguration with
+    // the matching codecType; sample_send_h264_pcm does NOT (H.264 is the
+    // default — codec_type 0 here keeps that proven path untouched).
+    if (codec_type != 0) {
         ar::VideoEncoderConfiguration ec;
-        ec.codecType = ar::VIDEO_CODEC_H265;
+        ec.codecType = static_cast<ar::VIDEO_CODEC_TYPE>(codec_type);
         track->setVideoEncoderConfiguration(ec);
     }
 
@@ -171,6 +172,8 @@ int cppshim_video_encoded_send(
     int is_keyframe,
     int fps,
     int codec_type,
+    int width,
+    int height,
     int64_t capture_time_ms) {
     if (!p || !p->sender || !buf || len == 0) return -1;
 
@@ -184,16 +187,40 @@ int cppshim_video_encoded_send(
     // codec, which is what actually routes the bitstream.
     (void)capture_time_ms;
 
+    // Per-frame info, byte-identical to the matching SDK sample:
+    //  - H.264/H.265 (codec_type 0/3): sample_send_h264_pcm / h265 set
+    //    {rotation, codecType, framesPerSecond, frameType} and derive
+    //    size from the in-band SPS — leave this proven path untouched.
+    //  - VP8/VP9/AV1: sample_send_ivfvp8 sets {rotation, codecType,
+    //    frameType, width, height} and does NOT set framesPerSecond.
+    //    VP8/VP9/AV1 carry no SPS, so without explicit width/height the
+    //    encoded track stays 0x0 and is never published (no remote user).
+    const bool is_h26x = (codec_type == 0 || codec_type == 3);
     ar::EncodedVideoFrameInfo info;
     info.rotation = ar::VIDEO_ORIENTATION_0;
     info.codecType = codec_type
         ? static_cast<ar::VIDEO_CODEC_TYPE>(codec_type)
         : ar::VIDEO_CODEC_H264;
-    info.framesPerSecond = fps;
     info.frameType = is_keyframe
         ? ar::VIDEO_FRAME_TYPE_KEY_FRAME
         : ar::VIDEO_FRAME_TYPE_DELTA_FRAME;
+    if (is_h26x) {
+        info.framesPerSecond = fps;
+    } else if (width > 0 && height > 0) {
+        info.width = width;
+        info.height = height;
+    }
     bool ok = p->sender->sendEncodedVideoImage(buf, len, info);
+    if (sta_trace()) {
+        static std::atomic<uint64_t> n{0};
+        uint64_t i = n.fetch_add(1);
+        if (i < 6 || i % 120 == 0) {
+            std::fprintf(stderr,
+                "shim.vid[%llu] codec=%d len=%u key=%d %dx%d rc=%s\n",
+                (unsigned long long)i, codec_type, len, is_keyframe,
+                info.width, info.height, ok ? "ok" : "FAIL");
+        }
+    }
     return ok ? 0 : 1;
 }
 
@@ -320,31 +347,6 @@ cppshim_local_user_observer* cppshim_local_user_observer_register(void* c_conn_h
 void cppshim_local_user_observer_destroy(cppshim_local_user_observer* obs) {
     if (!obs) return;
     if (obs->local) obs->local->unregisterLocalUserObserver(&obs->impl);
-    delete obs;
-}
-
-// --- ConnectionObserver registration ---
-
-struct cppshim_conn_observer {
-    NoopConnObserver impl;
-    ar::IRtcConnection* conn;  // borrowed
-};
-
-cppshim_conn_observer* cppshim_conn_observer_register(void* c_conn_handle) {
-    auto* conn = deref_c_handle<ar::IRtcConnection>(c_conn_handle);
-    if (!conn) return nullptr;
-    auto* obs = new cppshim_conn_observer{};
-    obs->conn = conn;
-    if (conn->registerObserver(&obs->impl) != 0) {
-        delete obs;
-        return nullptr;
-    }
-    return obs;
-}
-
-void cppshim_conn_observer_destroy(cppshim_conn_observer* obs) {
-    if (!obs) return;
-    if (obs->conn) obs->conn->unregisterObserver(&obs->impl);
     delete obs;
 }
 

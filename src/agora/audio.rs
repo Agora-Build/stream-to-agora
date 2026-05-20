@@ -138,11 +138,6 @@ impl EncodedAudioPublisher {
         let rc = unsafe { shim::cppshim_audio_encoded_publish(self.shim, self.conn) };
         check(rc, "cppshim_audio_encoded_publish")
     }
-
-    pub fn unpublish(&self) -> Result<(), AgoraError> {
-        let rc = unsafe { shim::cppshim_audio_encoded_unpublish(self.shim, self.conn) };
-        check(rc, "cppshim_audio_encoded_unpublish")
-    }
 }
 
 impl Drop for EncodedAudioPublisher {
@@ -189,12 +184,6 @@ impl RawAudioPublisher {
         let rc = unsafe { sys::agora_local_user_publish_audio(local, self.track) };
         check(rc, "agora_local_user_publish_audio")
     }
-
-    pub fn unpublish(&self) -> Result<(), AgoraError> {
-        let local = unsafe { sys::agora_rtc_conn_get_local_user(self.conn) };
-        let rc = unsafe { sys::agora_local_user_unpublish_audio(local, self.track) };
-        check(rc, "agora_local_user_unpublish_audio")
-    }
 }
 
 impl Drop for RawAudioPublisher {
@@ -205,5 +194,27 @@ impl Drop for RawAudioPublisher {
             sys::agora_local_audio_track_destroy(self.track);
             sys::agora_audio_pcm_data_sender_destroy(self.sender);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Same regression class as `video_codec_type`: these integers are
+    /// the SDK's `AUDIO_CODEC_TYPE` enum (AgoraBase.h) and MUST match it,
+    /// incl. the AAC profile → HE-AAC/HE-AACv2 disambiguation.
+    #[test]
+    fn audio_codec_maps_codec_and_profile() {
+        assert_eq!(audio_codec("aac", None), 8, "AUDIO_CODEC_AACLC");
+        assert_eq!(audio_codec("aac", Some("LC")), 8, "plain AAC-LC profile");
+        assert_eq!(audio_codec("aac", Some("HE-AAC")), 9, "AUDIO_CODEC_HEAAC");
+        assert_eq!(audio_codec("aac", Some("he-aac")), 9, "case-insensitive");
+        assert_eq!(audio_codec("aac", Some("HE-AACv2")), 11, "AUDIO_CODEC_HEAAC2");
+        assert_eq!(audio_codec("aac", Some("HE-AACV2")), 11, "case-insensitive");
+        assert_eq!(audio_codec("opus", None), 1, "AUDIO_CODEC_OPUS");
+        assert_eq!(audio_codec("pcm_mulaw", None), 4, "AUDIO_CODEC_PCMU");
+        assert_eq!(audio_codec("pcm_alaw", None), 3, "AUDIO_CODEC_PCMA");
+        assert_eq!(audio_codec("mp3", None), 8, "unknown → AAC-LC default");
     }
 }

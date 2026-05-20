@@ -153,7 +153,6 @@ async fn main() -> Result<()> {
         user_id: uid.value,
         use_string_uid: uid.string_mode,
         token: cli.token.clone(),
-        connect_timeout: std::time::Duration::from_secs(cli.connect_timeout),
     };
 
     // If --token-renew-cmd is set, allocate a tokio mpsc channel that the
@@ -255,7 +254,6 @@ async fn main() -> Result<()> {
         http_headers: cli.http_header.clone(),
         user_agent: cli.user_agent.clone(),
         rtsp_transport: cli.rtsp_transport.clone(),
-        reconnect_attempts: cli.reconnect_attempts,
         loop_forever: cli.r#loop,
     };
     let pipeline_info = {
