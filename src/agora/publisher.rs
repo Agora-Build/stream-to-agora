@@ -45,9 +45,12 @@ pub enum RequestedMode {
     #[default]
     Auto,
     /// Force the ffmpeg-decode → SDK-re-encode path for every input.
-    /// Costs CPU + one re-encode generation, but the SDK's own encoder
-    /// owns the bitstream — so it answers subscriber keyframe requests
-    /// (`onIntraRequestReceived`) and works for any codec ffmpeg decodes.
+    /// Costs CPU + one re-encode generation, but the SDK's internal
+    /// encoder owns the bitstream — it answers subscriber keyframe
+    /// requests (PLI) itself, with no app involvement, and works for
+    /// any codec ffmpeg decodes. (`onIntraRequestReceived` is the
+    /// *encoded*-path callback — app-is-encoder — and does not apply
+    /// here.)
     Raw,
     /// Force encoded passthrough. Errors at startup if a stream's codec
     /// has no passthrough path (`decide()` returns `Err`).

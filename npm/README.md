@@ -79,7 +79,7 @@ stream-to-agora rtmp://live.example.com/app/key --app-id ... --channel demo --rt
 | `--mode` | Behaviour |
 |---|---|
 | `auto` (default) | Encoded passthrough when every stream's codec is passthrough-eligible, else Raw. |
-| `raw` | Force ffmpeg-decode → SDK-re-encode for every input. More CPU + one re-encode generation, but the SDK's encoder owns the bitstream — it answers subscriber keyframe requests (no mid-join black) and works for any codec, including VP9/AV1. |
+| `raw` | Force ffmpeg-decode → SDK-re-encode for every input. More CPU + one re-encode generation, but the SDK's internal encoder owns the bitstream — it answers subscriber keyframe requests (PLI) itself, so mid-join subscribers aren't stuck on black, and it works for any codec ffmpeg decodes, including VP9/AV1. |
 | `encoded` | Force zero-CPU passthrough; errors at startup (naming the codec) if a stream can't pass through, instead of silently falling back. |
 
 ### Tokens
