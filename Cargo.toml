@@ -1,6 +1,6 @@
 [package]
 name = "stream-to-agora"
-version = "0.2.2"
+version = "0.3.0"
 edition = "2024"
 description = "Stream local files or http(s)/rtmp/rtsp URLs to an Agora RTC channel"
 license = "MIT"

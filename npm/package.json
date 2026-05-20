@@ -1,6 +1,6 @@
 {
   "name": "@agora-build/stream-to-agora",
-  "version": "0.2.2",
+  "version": "0.3.0",
   "description": "Stream local files or http(s)/rtmp/rtsp URLs to an Agora RTC channel.",
   "bin": {
     "stream-to-agora": "bin/stream-to-agora"
