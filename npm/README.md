@@ -69,9 +69,18 @@ stream-to-agora rtmp://live.example.com/app/key --app-id ... --channel demo --rt
 | `--channel <NAME>` | RTC channel to join. |
 | `--rtc-user-id <UID>` | RTC user. All-digit → int uid; non-digit → string account; `s/` prefix forces string mode. |
 | `--token <TOKEN>` | Pre-minted RTC token (required). |
+| `--mode <auto\|raw\|encoded>` | Sender path (default `auto`). See **Modes** below. |
 | `--loop` | Restart the input on EOF. |
 | `--audio-only` / `--video-only` | Push just one track. |
 | `--ffmpeg-path <PATH>` | ffmpeg binary (default: `ffmpeg` on `PATH`). |
+
+### Modes
+
+| `--mode` | Behaviour |
+|---|---|
+| `auto` (default) | Encoded passthrough when every stream's codec is passthrough-eligible, else Raw. |
+| `raw` | Force ffmpeg-decode → SDK-re-encode for every input. More CPU + one re-encode generation, but the SDK's encoder owns the bitstream — it answers subscriber keyframe requests (no mid-join black) and works for any codec, including VP9/AV1. |
+| `encoded` | Force zero-CPU passthrough; errors at startup (naming the codec) if a stream can't pass through, instead of silently falling back. |
 
 ### Tokens
 

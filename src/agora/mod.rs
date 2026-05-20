@@ -15,5 +15,5 @@ pub mod audio;
 #[allow(unused_imports)]
 pub use error::AgoraError;
 pub use observer::ConnEvent;
-pub use publisher::{decide, AudioPublisher, CodecMode, VideoPublisher};
+pub use publisher::{decide, AudioPublisher, CodecMode, RequestedMode, VideoPublisher};
 pub use session::{CancelToken, Session, SessionConfig};

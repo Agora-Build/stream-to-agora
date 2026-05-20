@@ -63,6 +63,14 @@ struct Cli {
     #[arg(long)]
     video_only: bool,
 
+    /// Sender path. `auto` (default) passes through codecs the SDK
+    /// accepts and decodes the rest; `raw` forces ffmpeg-decode +
+    /// SDK-re-encode for every input (more CPU, but the SDK encoder
+    /// answers subscriber keyframe requests); `encoded` forces
+    /// passthrough and errors at startup if a codec can't.
+    #[arg(long, value_enum, default_value_t = agora::RequestedMode::Auto)]
+    mode: agora::RequestedMode,
+
     /// Path to the ffmpeg binary. Defaults to "ffmpeg" on PATH.
     #[arg(long, default_value = "ffmpeg")]
     ffmpeg_path: String,
@@ -196,8 +204,8 @@ async fn main() -> Result<()> {
     if !cli.video_only && info.audio.is_none() {
         eprintln!("warning: input has no audio stream — publishing video only.");
     }
-    let mode = agora::decide(&info);
-    eprintln!("  codec mode: {mode:?}");
+    let mode = agora::decide(&info, cli.mode).map_err(|e| anyhow::anyhow!(e))?;
+    eprintln!("  codec mode: {mode:?} (--mode {:?})", cli.mode);
 
     // ── Create publishers and apply video metadata ────────────────────
     let audio_codec = info.audio.as_ref().map(|a| a.codec_name.clone()).unwrap_or_default();

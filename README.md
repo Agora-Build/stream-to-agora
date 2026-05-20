@@ -160,6 +160,25 @@ Mode is chosen at startup by `ffprobe`'ing the input: if both streams use
 codecs Agora's encoded senders accept, ffmpeg is launched with `-c copy`
 (zero-CPU demux); otherwise ffmpeg decodes and we push raw.
 
+### Sender mode (`--mode`)
+
+`--mode auto|raw|encoded` overrides that startup decision:
+
+| `--mode` | Behaviour |
+|----------|-----------|
+| `auto` (default) | Encoded passthrough when every stream's codec is passthrough-eligible, else Raw. |
+| `raw` | Force ffmpeg-decode → SDK-re-encode for **every** input. |
+| `encoded` | Force passthrough; **error at startup** if a stream's codec can't pass through (the error names the codec). |
+
+Pick `raw` when you want the SDK's own encoder to own the bitstream: it
+costs a full decode + one re-encode generation (CPU + slight quality
+loss), but in return the SDK answers subscriber keyframe requests
+(`onIntraRequestReceived`) — no mid-join black — and it works uniformly
+for every codec ffmpeg can decode, including VP9/AV1 (which can't pass
+through; see §Known Issues). `encoded` is the strict counterpart: it
+guarantees zero-CPU passthrough or a clear failure, never a silent
+fallback.
+
 ### Encoded passthrough caveats
 
 - **Mid-join keyframe latency.** Passthrough forwards the source bitstream
